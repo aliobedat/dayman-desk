@@ -6,11 +6,16 @@ using System.Text.Json.Serialization;
 
 namespace DaymanDesk.Core;
 
-// Shapes of docs/desk-api.md (v1.1). Property names serialize camelCase.
+// Shapes of docs/desk-api.md (v1.2). Property names serialize camelCase.
 public sealed record PairRequest(string Code, string DeviceName, string AppVersion);
 public sealed record PairResponse(string Token, string ShopName, string StampMode, int CodeValidityDays, bool QrEnabled);
-public sealed record ReceiptRequest(string ClientId, string InvoiceNo, string Amount, string PrintedAt, string Kind);
+/// <summary>v1.2: <paramref name="Code"/> is the pool code already printed on the slip (omitted when none).</summary>
+public sealed record ReceiptRequest(string ClientId, string InvoiceNo, string Amount, string PrintedAt, string Kind,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Code = null);
 public sealed record ReceiptResponse(string Code, string ClaimUrl, string ExpiresAt, bool Already);
+/// <summary>v1.2 (WO-90): a refill of the device's pool of pre-issued codes.</summary>
+public sealed record CodesRequest(int Count);
+public sealed record CodesResponse(List<string>? Codes, string? ClaimBase);
 public sealed record HeartbeatRequest(string AppVersion, string PrintKind, int QueueLength, long LastForwardMs);
 /// <summary>v1.1: latestVersion and downloadUrl are optional (omitted when the server has no download set).</summary>
 public sealed record HeartbeatResponse(string ServerTime, bool QrEnabled, int CodeValidityDays,
@@ -60,6 +65,9 @@ public sealed class DeskApiClient
 
     public Task<ApiResult<HeartbeatResponse>> HeartbeatAsync(string token, HeartbeatRequest req, CancellationToken ct = default) =>
         PostAsync<HeartbeatResponse>("/heartbeat", req, token, ct);
+
+    public Task<ApiResult<CodesResponse>> CodesAsync(string token, CodesRequest req, CancellationToken ct = default) =>
+        PostAsync<CodesResponse>("/codes", req, token, ct);
 
     public Task<ApiResult<object>> ReportAsync(string token, ReportRequest req, CancellationToken ct = default) =>
         PostAsync<object>("/report", req, token, ct);

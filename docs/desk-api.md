@@ -1,8 +1,8 @@
-# Dayman Desk API contract (v1.1, Ali 20 Nov 2026; v1 19 Nov 2026)
+# Dayman Desk API contract (v1.2 WO-90 and v1.1, Ali 20 Nov 2026; v1 19 Nov 2026)
 
 Both the server (WO-84, WO-86 items 8-12) and the Windows program (WO-85, WO-86 items 1-7) implement exactly this.
-This file is the single source; v1.1 changes are marked **v1.1** and are backward compatible (a v1 program ignores
-them, a v1.1 program works with a v1 server). Base URL: `https://daymanjo.com/api/desk`
+This file is the single source; v1.1 changes are marked **v1.1**, v1.2 changes **v1.2**. Both are backward compatible
+(an older program ignores them and keeps working unchanged; a newer program works with an older server). Base URL: `https://daymanjo.com/api/desk`
 (configurable in the program). JSON, UTF-8. Every error body: `{ "error": "<CODE>", "message": "<Arabic text>" }`.
 Every call except `pair` sends `Authorization: Bearer <deviceToken>`; a missing, wrong or revoked token → 401
 `UNAUTHORIZED` / `REVOKED`. Rate limits (Postgres counters) → 429 `RATE_LIMITED` with `retryAfterSeconds`.
@@ -12,8 +12,19 @@ Request `{ "code": "AB12CD", "deviceName": "كاشير 1", "appVersion": "0.1.0"
 200 `{ "token": "<64 hex>", "shopName": "جمرة", "stampMode": "spend"|"visit", "codeValidityDays": 2, "qrEnabled": true }`
 404 `CODE_NOT_FOUND`, 410 `CODE_EXPIRED` (pairing codes live 10 minutes, single use).
 
+## POST /codes (**v1.2**, WO-90)
+Request `{ "count": 50 }` (`count` optional, 1-100, default 50).
+200 `{ "codes": ["K7Q2M9XP2T", ...], "claimBase": "https://daymanjo.com/c/<shopToken>/s/" }`
+- Fresh random codes reserved for this device (the pool). A pool code has no invoice and no amount and is not
+  claimable: a customer who scans one before it is bound reads «فاتورتك قيد التسجيل، جرّب بعد دقيقة.» and nothing is
+  consumed. Pool codes count in no cap and no statistic (not «فاتورة غير مُستلمة») and are voided when the owner stops
+  the device. One never bound within 30 days of its refill expires (a claim reads the usual expired message, `/receipt`
+  answers `CODE_REFUSED`). A device holds at most 300 live unbound codes: past that `codes` is shorter or `[]`.
+- `claimBase` + code is the code's claim URL (the same as `/receipt`'s `claimUrl`), so the program prints offline.
+- Rate limit: 60 calls per device per hour. 400 `BAD_INPUT`.
+
 ## POST /receipt
-Request `{ "clientId": "<uuid v4>", "invoiceNo": "10432", "amount": "12.500", "printedAt": "2026-11-19T18:02:11+03:00", "kind": "text"|"image"|"unknown" }`
+Request `{ "clientId": "<uuid v4>", "invoiceNo": "10432", "amount": "12.500", "printedAt": "2026-11-19T18:02:11+03:00", "kind": "text"|"image"|"unknown", "code": "K7Q2M9XP2T" }`
 - `invoiceNo`: 1-40 safe characters (the WO-62 rule). `amount`: JOD as a string, up to 3 decimals, > 0, within
   the WO-61 delivery-code amount bounds. `clientId` makes the call idempotent.
 200 `{ "code": "K7Q2M9XP", "claimUrl": "https://daymanjo.com/c/<shopToken>/s/K7Q2M9XP", "expiresAt": "<ISO>", "already": false }`
@@ -21,9 +32,17 @@ Request `{ "clientId": "<uuid v4>", "invoiceNo": "10432", "amount": "12.500", "p
 - **WO-88** `printedAt` more than 5 minutes ahead of the server's clock or more than 8 days behind it (past the
   7-day offline queue) is replaced by the server's time (a wrong PC clock); the invoice's day is then today in Amman.
   A queued receipt within the window keeps its own print day.
+- **v1.2** `code` (optional): a pool code of this device the program already printed. The server binds it to this
+  receipt under every rule of this section (it becomes the receipt's code; `expiresAt` counts from the binding) and
+  answers it with `already: false`. The same receipt again answers it with `already: true`. If the invoice (number and
+  print day) already has another code, the answer is that code with `already: true` and the offered code is voided
+  (accepted edge case: two tills printed one invoice; the slip of the second is dead). A refusal below (`BAD_INPUT`,
+  `OUT_OF_RANGE`, `INVOICE_USED`, `INVOICE_VOIDED`) voids the offered code too, so its scan reads «هذا الرمز لا يعمل».
+  Without `code` (a v1.1 program) nothing changes.
 409 `INVOICE_USED` (a purchase not undone already carries this invoice number: the cashier entered it).
 409 `INVOICE_VOIDED` (**WO-88**: the owner voided this invoice's code with «إلغاء الكود»; the same invoice on the same
 Amman day never gets a code again). No QR, not queued, no report: the receipt is done.
+409 `CODE_REFUSED` (**v1.2**: `code` is not an unbound, unvoided, unexpired pool code of this device; nothing is registered).
 422 `OUT_OF_RANGE` (amount), 400 `BAD_INPUT`.
 
 ## POST /heartbeat (every 5 minutes)
@@ -49,8 +68,16 @@ into Windows and registers them through the unchanged `/receipt` with `kind: "im
 receipts (confirmation, both fields ≥ 0.75); an image it cannot read gets no `/receipt` call, no QR, and a `report`.
 
 ## Program behaviour bound to this contract
-- The QR (claimUrl) is printed only after `/receipt` answered 200. Offline or any error → the receipt prints
-  without a QR, the receipt is queued and sent later (no QR then), and a `report` is sent.
+- **v1.2** pool: the program keeps a local pool from `/codes`, topped up to 50 when fewer than 20 are left (after a
+  heartbeat and after a registered receipt; a server without `/codes` leaves it empty), and stops printing a pool code
+  25 days after receiving it. On a confidently read receipt whose total is within the amount bounds (1 to 10,000 JOD;
+  outside them it waits for `/receipt` as in 1.1, which answers 422 and prints no QR) it takes the next pool code, prints the QR slip at once (`claimBase` + code), records invoice + local day → code
+  (a reprint of the same invoice the same day prints the SAME code), then sends `/receipt` with `code`; offline or on
+  a transient error the call is queued with its code and binds when the server answers. `already: true` with a
+  different code is reported (`report`, kind `other`) and later reprints print that code. A refusal records the
+  invoice as refused for the day: a reprint prints no QR. A new pairing or a revoked token empties the pool.
+- With an empty pool (or a 1.1 program) the QR (claimUrl) is printed only after `/receipt` answered 200. Offline or
+  any error → the receipt prints without a QR, the receipt is queued and sent later (no QR then), and a `report` is sent.
 - `qrEnabled: false` (owner switched it off) → no QR, receipts still sent.
 - **v1.1** `/receipt` is called only after the owner confirmed the two fields on the first text receipt after pairing
   («تأكيد الحقول»), and only when both the invoice number and the total reach confidence ≥ 0.75. The confirmation

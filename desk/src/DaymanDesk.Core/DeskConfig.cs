@@ -39,6 +39,13 @@ public sealed class NetworkSettings
         : null;
 }
 
+/// <summary>WO-90: one pre-issued code and when this program stops printing it (before the server's 30 days run out).</summary>
+public sealed class PoolCode
+{
+    public string Code { get; set; } = "";
+    public DateTimeOffset Until { get; set; }
+}
+
 public sealed class DeskConfig
 {
     public const string TcpPortName = "DAYMAN_9100";
@@ -74,6 +81,13 @@ public sealed class DeskConfig
     public string? StampMode { get; set; }
     public bool QrEnabled { get; set; } = true;
     public int CodeValidityDays { get; set; } = 2;
+
+    // WO-90 pool (contract v1.2): codes the server reserved for this device (POST /codes), printed at once on the
+    // next receipts and bound by /receipt afterwards; the shop's claim URL prefix; and the code printed per
+    // invoice per local day ("yyyy-MM-dd|invoice" -> code, "" = refused by the server: no QR on a reprint).
+    public List<PoolCode> CodePool { get; set; } = new();
+    public string? ClaimBase { get; set; }
+    public Dictionary<string, string> PrintedCodes { get; set; } = new();
 
     // Learned from the shop's receipts
     public int? CodePage { get; set; }
@@ -113,6 +127,8 @@ public sealed class DeskConfig
         Printers ??= new();
         Network ??= new();
         UnknownFormatsReported ??= new();
+        CodePool ??= new();
+        PrintedCodes ??= new();
         if (Printers.Count == 0 && !string.IsNullOrEmpty(PrinterName))
             Printers.Add(new PrinterRoute
             {

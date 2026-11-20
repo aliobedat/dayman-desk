@@ -46,7 +46,7 @@ public static class Problems
     /// <summary>Arabic text: the problem, then what to do. Printing is never stopped by any of these.</summary>
     public static string Describe(string? code, string? detail = null) => code switch
     {
-        Offline => "لا يوجد اتصال بخادم دايماً. تُطبع الفواتير كالمعتاد بلا QR، وتُرسل إلى الخادم عند عودة الاتصال. تأكد من اتصال الإنترنت.",
+        Offline => "لا يوجد اتصال بخادم دايماً. تُطبع الفواتير كالمعتاد، ومعها QR ما دامت على الجهاز رموز جاهزة، وتُرسل إلى الخادم عند عودة الاتصال. تأكد من اتصال الإنترنت.",
         Revoked => "أُلغي ربط هذا الجهاز من لوحة التحكم. أنشئ رمز ربط جديداً من الإعدادات ← دايماً ديسك، واكتبه في تبويب «الربط».",
         ParseFailed => "لم يقرأ البرنامج رقم الفاتورة أو المجموع، فطُبعت بلا QR. إن تكرر ذلك فاضغط «إعادة تأكيد الحقول» في تبويب «الربط».",
         Rejected => "رفض الخادم الفاتورة" + (detail != null ? $" ({detail})" : "") + "، فطُبعت بلا QR. إن تكرر ذلك فتواصل مع دعم دايماً.",
@@ -213,6 +213,8 @@ public sealed class DeskAgent
                 }
             });
             await HandleAsync(job, forwardMs, seqAfterForward, analysis, lines, image, ext, rec, printerUnreachable, ocrAgree).ConfigureAwait(false);
+            // WO-90: after a registered receipt (never before its QR) the pool is topped up; offline the heartbeat does it.
+            if (rec.Registered) await RefillPoolAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -347,9 +349,21 @@ public sealed class DeskAgent
             return;
         }
 
+        // WO-90: with a pool code the slip prints now and the receipt is bound afterwards (also offline). A reprint
+        // of the same invoice the same day prints the same code. No pool code: wait for /receipt as before.
+        string invoiceKey = _now().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + "|" + ext.InvoiceNo;
+        // The server's amount bounds (lib/desk.ts: DELIVERY_MIN_FILS to PURCHASE_MAX_FILS): outside them no pool code
+        // is printed; /receipt answers 422 and the receipt gets no QR, as before.
+        bool inRange = ext.Total.Value >= MinAmount && ext.Total.Value <= MaxAmount;
+        string? poolCode = cfg.QrEnabled && inRange ? TakeCode(invoiceKey) : null;
         var req = new ReceiptRequest(
             Guid.NewGuid().ToString(), ext.InvoiceNo, ext.Total.Value.ToString("0.000", CultureInfo.InvariantCulture),
-            _now().ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture), KindWire(analysis.Kind));
+            _now().ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture), KindWire(analysis.Kind), poolCode);
+        if (poolCode != null)
+        {
+            await PrePrintedAsync(req, seq, rec, invoiceKey, analysis, ext, image).ConfigureAwait(false);
+            return;
+        }
         var started = _now();
         var res = await _api.ReceiptAsync(cfg.DeviceToken!, req).ConfigureAwait(false);
         _log.Info($"receipt -> {res}");
@@ -359,6 +373,7 @@ public sealed class DeskAgent
             rec.Registered = true;
             ClearProblem(Problems.Offline, Problems.RateLimited, Problems.ParseFailed, Problems.Rejected, Problems.OutOfRange,
                 Problems.ImageUnreadable, Problems.PrinterUnreachable);
+            if (ValidCode(res.Value.Code)) Remember(invoiceKey, res.Value.Code); // a reprint prints this code at once
             if (!_cfg.Current.QrEnabled) { rec.Status = "مسجّلة (أوقف صاحب المحل QR)"; return; }
             var c = _cfg.Current;
             byte[] slip;
@@ -398,6 +413,7 @@ public sealed class DeskAgent
             await ReportAsync("warn", "other", $"receipt queued: {res}").ConfigureAwait(false);
             return;
         }
+        if (res.Status == 409 || res.Status == 422) Remember(invoiceKey, ""); // a reprint prints no QR either
         if (res.Status == 409)
         {
             // WO-88: INVOICE_VOIDED, the owner voided this invoice's code; otherwise the cashier entered it.
@@ -415,6 +431,146 @@ public sealed class DeskAgent
             SetProblem(Problems.Rejected, res.Error);
         }
         await ReportAsync("error", "parse_failed", $"receipt rejected {res}: {Summary(analysis, ext, image)}").ConfigureAwait(false);
+    }
+
+    // ---------- WO-90: the pool of pre-issued codes ----------
+
+    /// <summary>Refill when fewer codes than this are left; ask for this many.</summary>
+    public const int PoolRefillAt = 20;
+    public const int PoolRefillCount = 50;
+    /// <summary>JOD; the server's DELIVERY_MIN_FILS (1000) and PURCHASE_MAX_FILS (10,000,000) bounds.</summary>
+    public const decimal MinAmount = 1.000m, MaxAmount = 10000.000m;
+    /// <summary>The server expires an unbound pool code 30 days after the refill; the program stops printing it at 25.</summary>
+    public static readonly TimeSpan PoolLifetime = TimeSpan.FromDays(25);
+    static readonly TimeSpan PoolRetry = TimeSpan.FromMinutes(1);
+    const string CodeAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    int _refilling;
+    DateTimeOffset _poolFailedAt = DateTimeOffset.MinValue;
+
+    /// <summary>A stamp code as the server sends it: 10 characters of Crockford base 32.</summary>
+    public static bool ValidCode(string? code) => code != null && code.Length == 10 && code.All(ch => CodeAlphabet.Contains(ch));
+
+    /// <summary>The claim URL prefix: absolute https, printable ASCII, ending in /s/ (the slip's QR is it plus the code).</summary>
+    public static bool ValidClaimBase(string? url) =>
+        url != null && url.Length <= 600 && url.EndsWith("/s/", StringComparison.Ordinal) && url.All(ch => ch > 0x20 && ch < 0x7F)
+        && Uri.TryCreate(url, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps && string.IsNullOrEmpty(u.UserInfo);
+
+    /// <summary>
+    /// The code to print for this invoice today: the one already printed for it, else the next pool code (recorded
+    /// for a reprint). Null: refused before, no pool, or no claim base. Also forgets invoices older than 8 days.
+    /// </summary>
+    string? TakeCode(string key)
+    {
+        string? code = null;
+        string cutoff = _now().AddDays(-8).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        _cfg.Update(c =>
+        {
+            foreach (var old in c.PrintedCodes.Keys.Where(k => string.CompareOrdinal(k, cutoff) < 0).ToList()) c.PrintedCodes.Remove(old);
+            if (c.PrintedCodes.TryGetValue(key, out var had)) { code = had.Length == 0 ? null : had; return; }
+            var now = _now();
+            c.CodePool.RemoveAll(p => p.Until <= now); // never bound in time: the server has expired it
+            if (!ValidClaimBase(c.ClaimBase) || c.CodePool.Count == 0) return;
+            code = c.CodePool[0].Code;
+            c.CodePool.RemoveAt(0);
+            c.PrintedCodes[key] = code;
+        });
+        return code;
+    }
+
+    void Remember(string key, string code)
+    {
+        try { _cfg.Update(c => c.PrintedCodes[key] = code); }
+        catch (Exception ex) { _log.Warn("printed code not saved: " + ex.GetType().Name); }
+    }
+
+    /// <summary>The slip with a pool code printed at once; then the binding (/receipt with code), queued when offline.</summary>
+    async Task PrePrintedAsync(ReceiptRequest req, long seq, ReceiptRecord rec, string invoiceKey, AnalysisResult analysis,
+        ExtractResult ext, ImageRead image)
+    {
+        var c = _cfg.Current;
+        byte[]? slip = null;
+        try { slip = QrReceipt.Build(c.ClaimBase + req.Code, c.CodePage, c.CodeTable, req.InvoiceNo, req.Amount); }
+        catch (ArgumentException) { _log.Error("pool slip not printable"); }
+        rec.QrPrinted = slip != null && _printIfCurrent(seq, slip);
+        if (rec.QrPrinted) ClearProblem(Problems.QrPrintFailed);
+        else _log.Warn("pool qr skipped: another job was forwarded or the slip did not print");
+
+        var res = await _api.ReceiptAsync(c.DeviceToken!, req).ConfigureAwait(false);
+        _log.Info($"receipt (pool) -> {res}");
+        string printed = rec.QrPrinted ? "QR مطبوع" : "QR لم يُطبع (طُبعت فاتورة بعدها)";
+        if (res.Ok && res.Value != null)
+        {
+            rec.Registered = true;
+            ClearProblem(Problems.Offline, Problems.RateLimited, Problems.ParseFailed, Problems.Rejected, Problems.OutOfRange,
+                Problems.ImageUnreadable, Problems.PrinterUnreachable);
+            if (res.Value.Code != req.Code)
+            {
+                // Accepted edge case: another till registered this invoice first. Its code stands, this slip's is void.
+                if (ValidCode(res.Value.Code)) Remember(invoiceKey, res.Value.Code);
+                rec.Status = "مسجّلة على جهاز آخر: QR هذه النسخة لا يعمل";
+                await ReportAsync("warn", "other", "pool code replaced: the invoice already had another code (printed on another till)").ConfigureAwait(false);
+            }
+            else rec.Status = printed + (res.Value.Already ? " (فاتورة مكررة)" : "");
+        }
+        else if (res.Unauthorized)
+        {
+            Unpair(res.Error);
+            rec.Status = "أُلغي ربط الجهاز: QR هذه الفاتورة لا يعمل";
+        }
+        else if (res.Transient)
+        {
+            // The printed code stays this receipt's: the queue binds it when the server answers again.
+            _queue.Enqueue("receipt", req);
+            SetProblem(res.Status == 429 ? Problems.RateLimited : Problems.Offline);
+            rec.Status = printed + "، يُسجَّل عند عودة الاتصال";
+            await ReportAsync("warn", "other", $"receipt queued with its pool code: {res}").ConfigureAwait(false);
+        }
+        else
+        {
+            // Refused: the server voided the printed code (a scan says so). A reprint today prints no QR.
+            Remember(invoiceKey, "");
+            if (res.Status == 409 && res.Error == "INVOICE_VOIDED") rec.Status = StatusVoided;
+            else if (res.Status == 409 && res.Error == "INVOICE_USED") rec.Status = StatusCashier;
+            else
+            {
+                if (res.Status == 422) { rec.Status = "المبلغ خارج الحد: QR المطبوع لا يعمل"; SetProblem(Problems.OutOfRange); }
+                else { rec.Status = $"رفضها الخادم ({res.Error}): QR المطبوع لا يعمل"; SetProblem(Problems.Rejected, res.Error); }
+                await ReportAsync("error", "parse_failed", $"receipt with pool code rejected {res}: {Summary(analysis, ext, image)}").ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>Tops the pool up (POST /codes) when it runs low. One at a time; after a failure, not again for a minute.</summary>
+    public async Task RefillPoolAsync()
+    {
+        var cfg = _cfg.Current;
+        var now = _now();
+        if (!cfg.Paired || !cfg.QrEnabled || cfg.CodePool.Count(p => p.Until > now) >= PoolRefillAt || now - _poolFailedAt < PoolRetry) return;
+        if (Interlocked.Exchange(ref _refilling, 1) == 1) return;
+        try
+        {
+            string token = cfg.DeviceToken!;
+            var res = await _api.CodesAsync(token, new CodesRequest(PoolRefillCount)).ConfigureAwait(false);
+            if (res.Ok && res.Value != null && ValidClaimBase(res.Value.ClaimBase))
+            {
+                var fresh = (res.Value.Codes ?? new()).Where(ValidCode).Distinct().ToList();
+                _cfg.Update(c =>
+                {
+                    if (c.DeviceToken != token) return; // paired again meanwhile: these codes belong to the old device
+                    c.ClaimBase = res.Value.ClaimBase;
+                    var until = _now() + PoolLifetime;
+                    foreach (var code in fresh) if (!c.CodePool.Any(p => p.Code == code)) c.CodePool.Add(new PoolCode { Code = code, Until = until });
+                });
+                if (fresh.Count == 0) _poolFailedAt = _now();
+                _log.Info($"pool: +{fresh.Count}, {_cfg.Current.CodePool.Count} ready");
+                return;
+            }
+            _poolFailedAt = _now();
+            if (res.Unauthorized) Unpair(res.Error);
+            else _log.Warn($"pool refill: {res}"); // a 1.1 server has no /codes: receipts wait for /receipt as before
+        }
+        catch (Exception ex) { _poolFailedAt = _now(); _log.Warn("pool refill failed: " + ex.GetType().Name); }
+        finally { Interlocked.Exchange(ref _refilling, 0); }
     }
 
     /// <summary>WO-89: an unknown print format is reported once per format per day, not per receipt.</summary>
@@ -517,7 +673,8 @@ public sealed class DeskAgent
     void Unpair(string? why)
     {
         _log.Error("device token refused (" + why + "): unpaired");
-        _cfg.Update(c => c.DeviceToken = null);
+        // WO-90: a revoked device's pool is void on the server; a new pairing starts a new one.
+        _cfg.Update(c => { c.DeviceToken = null; c.CodePool.Clear(); c.ClaimBase = null; c.PrintedCodes.Clear(); });
         SetProblem(Problems.Revoked);
     }
 
@@ -596,6 +753,7 @@ public sealed class DeskAgent
             ClearProblem(Problems.Offline, Problems.RateLimited);
             if (newer) UpdateAvailable?.Invoke(v.LatestVersion!.Trim(), v.DownloadUrl!);
             await FlushQueueAsync().ConfigureAwait(false);
+            await RefillPoolAsync().ConfigureAwait(false);
         }
         else if (res.Unauthorized) Unpair(res.Error);
         else
@@ -622,6 +780,9 @@ public sealed class DeskAgent
                     if (req == null) return SendOutcome.Rejected;
                     var r = await _api.ReceiptAsync(token, req).ConfigureAwait(false);
                     (status, ok, transient, unauthorized) = (r.Status, r.Ok, r.Transient, r.Unauthorized);
+                    // WO-90: another till registered this invoice first; the code printed here is void (accepted edge case).
+                    if (r.Ok && req.Code != null && r.Value != null && r.Value.Code != req.Code)
+                        _log.Warn("queued receipt: the invoice already had another code, the printed pool code is void");
                 }
                 else
                 {
@@ -653,6 +814,8 @@ public sealed class DeskAgent
                 c.DeviceToken = v.Token; c.ShopName = v.ShopName; c.StampMode = v.StampMode;
                 c.CodeValidityDays = v.CodeValidityDays; c.QrEnabled = v.QrEnabled; c.DeviceName = deviceName;
                 c.SamplesSent = 0;
+                // WO-90: the old pool belongs to the old device (the server refuses it for this one).
+                c.CodePool.Clear(); c.ClaimBase = null; c.PrintedCodes.Clear();
                 // A new pairing asks again on the first receipt (it may be another shop or another POS).
                 c.FieldsConfirmed = false; c.LearnedInvoice = null; c.LearnedTotal = null;
                 if (c.LastProblem is Problems.Revoked or Problems.TokenUnreadable) { c.LastProblem = null; c.LastProblemDetail = null; c.LastProblemAt = null; }
