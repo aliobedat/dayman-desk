@@ -34,9 +34,25 @@ static class Installer
             }
         }
         ScheduledTasks.Register(sh, InstalledExe, $"{Environment.UserDomainName}\\{Environment.UserName}");
+        AddShortcut(sh, log);
     }
 
-    public static void RemoveTasks(IShell sh) => ScheduledTasks.Remove(sh);
+    public static void RemoveTasks(IShell sh)
+    {
+        ScheduledTasks.Remove(sh);
+        try { if (File.Exists(ShortcutPath)) File.Delete(ShortcutPath); } catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
+
+    /// <summary>WO-91: «دايماً ديسك» in the Start menu of every user (the window is otherwise reachable only from the tray).</summary>
+    static string ShortcutPath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms), "دايماً ديسك.lnk");
+
+    /// <summary>Best effort: a missing shortcut never fails the install.</summary>
+    static void AddShortcut(IShell sh, RollingLog log)
+    {
+        var r = sh.Run($"$s = (New-Object -ComObject WScript.Shell).CreateShortcut({PrinterSetup.Q(ShortcutPath)}); " +
+            $"$s.TargetPath = {PrinterSetup.Q(InstalledExe)}; $s.WorkingDirectory = {PrinterSetup.Q(InstallDir)}; $s.Save()");
+        if (!r.Ok) log.Warn("start menu shortcut not created: " + r.Stderr);
+    }
 
     /// <summary>The config holds the device token: only SYSTEM and Administrators may read the data folder.</summary>
     public static void LockDataDir(RollingLog log)

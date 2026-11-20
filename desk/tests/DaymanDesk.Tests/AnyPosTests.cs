@@ -66,6 +66,7 @@ public static class AnyPosTests
         public Func<MonoBitmap, IReadOnlyList<string>?> Read = _ => null;
         public readonly List<MonoBitmap> Seen = new();
         public Task<IReadOnlyList<string>?> ReadAsync(MonoBitmap image) { Seen.Add(image); return Task.FromResult(Read(image)); }
+        public string? LanguageTag { get; set; }
     }
 
     /// <summary>A shell with three Windows printers: USB, a Standard TCP/IP (RAW) network printer, and COM.</summary>
@@ -175,26 +176,26 @@ public static class AnyPosTests
         Assert.True(server.Start(a) && server.Start(b), "both listen");
         try
         {
-            Send(a.ListenPort, Encoding.ASCII.GetBytes("receipt A"));
+            Send(a.ListenPort, Encoding.ASCII.GetBytes("receipt A ........"));
             await Until(() => jobs.Count == 1, "job A");
-            Send(b.ListenPort, Encoding.ASCII.GetBytes("receipt B"));
+            Send(b.ListenPort, Encoding.ASCII.GetBytes("receipt B ........"));
             await Until(() => jobs.Count == 2, "job B");
             var ja = jobs.First(j => j.Route.PrinterName == "POS-80");
             var jb = jobs.First(j => j.Route.PrinterName == "Bar");
-            Assert.Equal("receipt A", Encoding.ASCII.GetString(q.To("Dayman Raw (POS-80)").Single()), "A forwarded to A's raw queue");
-            Assert.Equal("receipt B", Encoding.ASCII.GetString(q.To("Dayman Raw (Bar)").Single()), "B forwarded to B's raw queue");
+            Assert.Equal("receipt A ........", Encoding.ASCII.GetString(q.To(DeskConfig.RawQueueFor("POS-80")).Single()), "A forwarded to A's raw queue");
+            Assert.Equal("receipt B ........", Encoding.ASCII.GetString(q.To(DeskConfig.RawQueueFor("Bar")).Single()), "B forwarded to B's raw queue");
             Assert.True(ja.Seq != jb.Seq, "sequences unique across printers");
 
             // A job on B does not stop A's QR: the slip goes to A's printer.
             Assert.True(server.PrintIfCurrent(ja.Seq, Encoding.ASCII.GetBytes("QR A")), "A still current");
-            Assert.Equal(2, q.To("Dayman Raw (POS-80)").Count, "QR on A");
-            Assert.Equal(1, q.To("Dayman Raw (Bar)").Count, "nothing extra on B");
+            Assert.Equal(2, q.To(DeskConfig.RawQueueFor("POS-80")).Count, "QR on A");
+            Assert.Equal(1, q.To(DeskConfig.RawQueueFor("Bar")).Count, "nothing extra on B");
             // A newer job on A: A's old QR must not print under it.
-            Send(a.ListenPort, Encoding.ASCII.GetBytes("receipt A2"));
+            Send(a.ListenPort, Encoding.ASCII.GetBytes("receipt A2 ......."));
             await Until(() => jobs.Count == 3, "job A2");
             Assert.True(!server.PrintIfCurrent(ja.Seq, Encoding.ASCII.GetBytes("late QR")), "stale QR refused");
             Assert.True(server.PrintIfCurrent(jb.Seq, Encoding.ASCII.GetBytes("QR B")), "B still current");
-            Assert.Equal("QR B", Encoding.ASCII.GetString(q.To("Dayman Raw (Bar)").Last()), "QR on B");
+            Assert.Equal("QR B", Encoding.ASCII.GetString(q.To(DeskConfig.RawQueueFor("Bar")).Last()), "QR on B");
         }
         finally { server.StopAll(); }
         Assert.True(!server.Running, "stopped");
@@ -217,8 +218,8 @@ public static class AnyPosTests
             await Until(() => done.Count == 1, "processed");
             var rec = await Within(done.Single());
             Assert.True(rec.QrPrinted, "qr printed: " + rec.Status);
-            Assert.Equal(0, q.To("Dayman Raw (POS-80)").Count, "nothing on the other printer");
-            var onB = q.To("Dayman Raw (Bar)");
+            Assert.Equal(0, q.To(DeskConfig.RawQueueFor("POS-80")).Count, "nothing on the other printer");
+            var onB = q.To(DeskConfig.RawQueueFor("Bar"));
             Assert.Equal(2, onB.Count, "receipt then QR on the same printer");
             Assert.True(Convert.ToHexString(onB[1]).Contains(Convert.ToHexString(Encoding.ASCII.GetBytes(Claim))), "slip carries the claim url");
         }
@@ -255,9 +256,9 @@ public static class AnyPosTests
         server.Start(r);
         try
         {
-            Send(r.ListenPort, Encoding.ASCII.GetBytes("network receipt"));
+            Send(r.ListenPort, Encoding.ASCII.GetBytes("network receipt ..."));
             await Until(() => jobs.Count == 1 && printer.Jobs.Count == 1, "direct job");
-            Assert.Equal("network receipt", Encoding.ASCII.GetString(printer.Jobs.Single()), "printer got the bytes");
+            Assert.Equal("network receipt ...", Encoding.ASCII.GetString(printer.Jobs.Single()), "printer got the bytes");
             Assert.Equal(0, q.Writes.Count, "spooler not used");
             Assert.True(!jobs.Single().PrinterUnreachable, "reachable");
             Assert.True(server.PrintIfCurrent(jobs.Single().Seq, Encoding.ASCII.GetBytes("QR")), "qr");
@@ -281,7 +282,7 @@ public static class AnyPosTests
             Send(r.ListenPort, Receipts.Cp1256(Receipts.Arabic));
             await Until(() => done.Count == 1, "processed", 15_000);
             var rec = await Within(done.Single());
-            Assert.Equal(1, q.To("Dayman Raw (Bar)").Count, "the job waits in the spooler queue on the real port");
+            Assert.Equal(1, q.To(DeskConfig.RawQueueFor("Bar")).Count, "the job waits in the spooler queue on the real port");
             Assert.True(!rec.QrPrinted && !rec.Registered, "no qr: " + rec.Status);
             Assert.Equal(0, rig.Calls("/receipt").Count, "not registered");
             Assert.Equal(Problems.PrinterUnreachable, rig.Cfg.Current.LastProblem, "problem shown");
@@ -390,7 +391,7 @@ public static class AnyPosTests
         Assert.Equal("192.168.1.50", bar.DirectHost, "TCP/IP printer forwarded directly");
         Assert.Equal(9100, bar.DirectPort, "its RAW port");
         Assert.Equal<string?>(null, c.Printers.Single(r => r.PrinterName == "POS-80").DirectHost, "USB printer via its raw queue");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Add-Printer -Name 'Dayman Raw (Bar)' -DriverName 'Generic / Text Only' -PortName 'IP_192.168.1.50'")), "Bar's spooler fallback on its real port");
+        Assert.True(sh.Scripts.Any(s => s.Contains("Add-Printer -Name '" + DeskConfig.RawQueueFor("Bar") + "' -DriverName 'Generic / Text Only' -PortName 'IP_192.168.1.50'")), "Bar's spooler fallback on its real port");
         Assert.True(sh.Scripts.Any(s => s.Contains("Add-PrinterPort -Name 'DAYMAN_9101' -PrinterHostAddress '127.0.0.1' -PortNumber 9101")), "second tcp port");
         Assert.Equal("POS-80", c.PrinterName, "v1.0 mirror is the 9100 printer");
 
@@ -410,7 +411,7 @@ public static class AnyPosTests
         setup.Uninstall(store);
         Assert.Equal("USB001", sh.Ports["POS-80"], "restored");
         Assert.Equal("IP_192.168.1.50", sh.Ports["Bar"], "restored");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Remove-Printer -Name 'Dayman Raw (POS-80)'")) && sh.Scripts.Any(s => s.Contains("Remove-Printer -Name 'Dayman Raw (Bar)'")), "raw queues removed");
+        Assert.True(sh.Scripts.Any(s => s.Contains("Remove-Printer -Name '" + DeskConfig.RawQueueFor("POS-80") + "'")) && sh.Scripts.Any(s => s.Contains("Remove-Printer -Name '" + DeskConfig.RawQueueFor("Bar") + "'")), "raw queues removed");
         Assert.True(!sh.Scripts.Any(s => s.Contains("NetFirewallRule")), "printers only: the firewall is not touched");
         Assert.True(!store.Current.Active && store.Current.Network.Enabled, "off; network mode left to StopAndRestore");
     }
@@ -712,5 +713,179 @@ public static class AnyPosTests
         await rig.Agent.ProcessJobAsync(Receipts.Garbage(5), 5, 1);
         Assert.Equal(3, rig.ReportKinds.Count(k => k == "unknown_format"), "again the next day");
         Assert.Equal(1, rig.Cfg.Current.TodayNotRegistered, "still counted as a receipt that did not register");
+    }
+
+    // ---------- WO-91: field audit ----------
+
+    public static async Task TestTinyJobKeepsTheQrAndIsNotAnalysed()
+    {
+        var q = new FakeQueue();
+        var server = new PassThroughServer(q, new RollingLog(Tmp.Dir()), (_, _) => throw new AssertException("no fallback"));
+        var jobs = new ConcurrentQueue<ForwardedJob>();
+        server.JobForwarded += j => jobs.Enqueue(j);
+        var a = Win("POS-80", FreePort());
+        server.Start(a);
+        try
+        {
+            Send(a.ListenPort, Encoding.ASCII.GetBytes("receipt A ........"));
+            await Until(() => jobs.Count == 1, "receipt");
+            Send(a.ListenPort, new byte[] { 0x1B, 0x70, 0x00, 0x19, 0xFA }); // ESC p: open the cash drawer
+            await Until(() => q.To(DeskConfig.RawQueueFor("POS-80")).Count == 2, "drawer kick forwarded");
+            await Task.Delay(100);
+            Assert.Equal(1, jobs.Count, "the drawer kick is not a job");
+            Assert.True(server.PrintIfCurrent(jobs.Single().Seq, Encoding.ASCII.GetBytes("QR A")), "the receipt's QR still prints");
+        }
+        finally { server.StopAll(); }
+    }
+
+    public static async Task TestShortUnknownJobIsNotAReceipt()
+    {
+        var rig = new Rig();
+        var rec = await rig.Agent.ProcessJobAsync(new byte[] { 0x1B, 0x40, 0x1D, 0x72, 0x01, 0x10, 0x04, 0x01, 0x1B, 0x40, 0x0A, 0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x00 }, 5, 1);
+        Assert.True(rec.NonReceipt && !rec.QrPrinted, "not a receipt: " + rec.Status);
+        Assert.Equal(0, rig.Cfg.Current.TodayReceipts, "not counted");
+        Assert.Equal(0, rig.ReportKinds.Count, "no report");
+    }
+
+    public static async Task TestSampleAndSlowReportsGoAfterTheSlip()
+    {
+        var rig = new Rig();
+        rig.Cfg.Update(c => c.SamplesSent = 0);
+        var order = new List<string>();
+        rig.PrintIfCurrent = (_, _) => { lock (order) order.Add("slip"); return true; };
+        var inner = rig.Http.Respond;
+        rig.Http.Respond = (r, b) => { lock (order) order.Add(r.RequestUri!.AbsolutePath.EndsWith("/report") ? "report" : "receipt"); return inner(r, b); };
+        var rec = await rig.Agent.ProcessJobAsync(Receipts.Cp1256(Receipts.Arabic), 450, 1);
+        Assert.True(rec.QrPrinted, "qr: " + rec.Status);
+        int slip = order.IndexOf("slip"), firstReport = order.IndexOf("report");
+        Assert.True(slip >= 0 && firstReport > slip, "slip before the sample and slow-forward reports: " + string.Join(",", order));
+        Assert.True(rig.ReportKinds.Contains("sample") && rig.ReportKinds.Contains("slow_forward"), "both still sent");
+    }
+
+    public static async Task TestOcrLanguageChangeAsksAgain()
+    {
+        var rig = new Rig(confirmed: false);
+        var reconfirm = 0;
+        rig.Agent.ReconfirmNeeded += () => reconfirm++;
+        rig.Ocr.Read = _ => OcrReceipt;
+        rig.Ocr.LanguageTag = "en-US";
+        await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);
+        var p = rig.Asked.Single();
+        Assert.Equal<string?>(null, rig.Agent.ConfirmFields(p, p.InvoiceLine, p.TotalLine), "confirmed under English OCR");
+        Assert.Equal("en-US", rig.Cfg.Current.FieldsOcrLanguage, "language stored with the fields");
+        Assert.True((await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1)).QrPrinted, "same language: registers");
+
+        rig.Ocr.LanguageTag = "ar-SA"; // Arabic OCR arrived from Windows Update
+        var rec = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);
+        Assert.True(!rec.QrPrinted && !rig.Cfg.Current.FieldsConfirmed, "fields dropped, no qr: " + rec.Status);
+        Assert.Equal(1, reconfirm, "the owner is told");
+        Assert.Equal(2, rig.Asked.Count, "the window opens on this receipt");
+    }
+
+    public static void TestPairCodeUsesTheServerAlphabet()
+    {
+        Assert.Equal<string?>(null, DeskAgent.PairCodeProblem(" ab3cd9 "), "case-insensitive, trimmed");
+        Assert.True(DeskAgent.PairCodeProblem("AB1CD9") != null, "1 is not in the alphabet");
+        Assert.True(DeskAgent.PairCodeProblem("ABCDE") != null, "length");
+        Assert.True(DeskAgent.PairCodeProblem("شسيبلا")!.Contains("Alt+Shift"), "Arabic keyboard named");
+    }
+
+    public static void TestUnsupportedPrintersRefused()
+    {
+        Assert.True(new PrinterInfo("Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF").Unsupported != null, "pdf");
+        Assert.True(new PrinterInfo("Microsoft XPS Document Writer", "XPSPort:", "Microsoft XPS Document Writer v4").Unsupported != null, "xps");
+        Assert.True(new PrinterInfo("OneNote (Desktop)", "nul:", "Send to Microsoft OneNote 16 Driver").Unsupported != null, "onenote");
+        Assert.True(new PrinterInfo("Fax", "SHRFAX:", "Microsoft Shared Fax Driver").Unsupported != null, "fax");
+        Assert.True(new PrinterInfo(@"\\CASHIER2\POS-80", @"\\CASHIER2\POS-80", "POS Driver").Unsupported != null, "shared");
+        var file = new PrinterInfo("Generic", "FILE:", "Generic / Text Only");
+        Assert.True(file.Unsupported == null && file.FilePort, "FILE: allowed with a note");
+        Assert.True(new PrinterInfo("POS-80", "USB001", "POS-80 Driver").Unsupported == null, "a receipt printer");
+
+        var sh = new FakeShell();
+        var store = new ConfigStore(Path.Combine(Tmp.Dir(), "config.json"));
+        try { new PrinterSetup(sh, null).Install(store, new[] { "Microsoft Print to PDF" }, _ => true); throw new AssertException("install accepted a pdf printer"); }
+        catch (SetupException ex) { Assert.True(ex.Arabic.Contains("لا تصلح"), "refused: " + ex.Arabic); }
+        Assert.True(!sh.Scripts.Any(s => s.StartsWith("Set-Printer")), "nothing moved");
+    }
+
+    public static void TestDeletedPrinterIsNothingToRestore()
+    {
+        var sh = new MultiShell();
+        sh.Override = s => s.StartsWith("(Get-Printer -Name 'Gone')") ? new ShellResult(1, "", "not found")
+            : s.Contains("'missing'") && s.Contains("'Gone'") ? new ShellResult(0, "missing", "") : null;
+        var setup = new PrinterSetup(sh, null);
+        Assert.True(!setup.Restore(new PrinterRoute { PrinterName = "Gone", OriginalPort = "USB002", ListenPort = 9100 }), "deleted: no throw");
+        sh.Override = s => s.StartsWith("(Get-Printer -Name 'Gone')") ? new ShellResult(1, "", "rpc error") : null;
+        try { setup.Restore(new PrinterRoute { PrinterName = "Gone", OriginalPort = "USB002", ListenPort = 9100 }); throw new AssertException("unreadable port accepted"); }
+        catch (SetupException) { }
+    }
+
+    public static void TestStoppedSpoolerIsNotAMissingPrinter()
+    {
+        var sh = new MultiShell();
+        string spooler = "Running";
+        sh.Override = s => s.StartsWith("(Get-Printer -Name 'POS-80')") ? new ShellResult(1, "", "spooler not running")
+            : s.StartsWith("if ((Get-Service") ? new ShellResult(0, spooler == "Running" ? "missing" : "spooler", "") : null;
+        Assert.True(PrinterSetup.MissingScript("POS-80").Contains("Get-Service -Name Spooler") && PrinterSetup.MissingScript("POS-80").Contains("-ErrorAction Stop"), "script checks the spooler");
+        var setup = new PrinterSetup(sh, null);
+        var route = new PrinterRoute { PrinterName = "POS-80", OriginalPort = "USB001", ListenPort = 9100 };
+        spooler = "Stopped";
+        try { setup.Restore(route); throw new AssertException("a stopped spooler counted as a deleted printer"); }
+        catch (SetupException) { }
+        Assert.True(!setup.SkippedMissing, "nothing skipped");
+        spooler = "Running";
+        Assert.True(!setup.Restore(route) && setup.SkippedMissing, "deleted while the spooler runs: skipped, and said so");
+    }
+
+    public static async Task TestPrinterCommandKeepsThePreviousQrPending()
+    {
+        var q = new FakeQueue();
+        var server = new PassThroughServer(q, new RollingLog(Tmp.Dir()), (_, _) => throw new AssertException("no fallback"));
+        var jobs = new ConcurrentQueue<ForwardedJob>();
+        server.JobForwarded += j => jobs.Enqueue(j);
+        var a = Win("POS-80", FreePort());
+        server.Start(a);
+        try
+        {
+            Send(a.ListenPort, Encoding.ASCII.GetBytes("receipt A ........"));
+            await Until(() => jobs.Count == 1, "receipt");
+            var ja = jobs.Single();
+            // 20 bytes of commands (init, status, feed, cut): 16 or more, so it is a job until analysed.
+            var cmd = new byte[] { 0x1B, 0x40, 0x1D, 0x72, 0x01, 0x10, 0x04, 0x01, 0x1B, 0x40, 0x0A, 0x0A, 0x0A, 0x0A, 0x1D, 0x56, 0x00, 0x1B, 0x40, 0x0A };
+            Send(a.ListenPort, cmd);
+            await Until(() => jobs.Count == 2, "command job");
+            var jc = jobs.Last();
+            Assert.True(!server.PrintIfCurrent(ja.Seq, Encoding.ASCII.GetBytes("QR")), "before the analysis the receipt is not current");
+
+            var rig = new Rig();
+            bool released = false;
+            var rec = await rig.Agent.ProcessJobAsync(jc.Data, 5, jc.Seq, printedNothing: () => { released = true; server.Release(jc.Seq, jc.PrevSeq); });
+            Assert.True(rec.NonReceipt && released, "a printer command, released: " + rec.Status);
+            Assert.True(server.PrintIfCurrent(ja.Seq, Encoding.ASCII.GetBytes("QR A")), "the previous receipt's QR still prints");
+
+            bool kitchenReleased = false;
+            var kitchen = await rig.Agent.ProcessJobAsync(Receipts.Cp1256(new[] { "طلب مطبخ", "شاورما عربي 2", "طاولة 4" }), 5, 99, printedNothing: () => kitchenReleased = true);
+            Assert.True(kitchen.NonReceipt && !kitchenReleased, "a kitchen ticket printed paper: never released");
+        }
+        finally { server.StopAll(); }
+    }
+
+    public static async Task TestPreV122ImageFieldsAdoptTheCurrentOcrLanguage()
+    {
+        var rig = new Rig(confirmed: false);
+        rig.Ocr.Read = _ => OcrReceipt;
+        await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);
+        var p = rig.Asked.Single();
+        rig.Agent.ConfirmFields(p, p.InvoiceLine, p.TotalLine);
+        Assert.True(rig.Cfg.Current.FieldsOcrLanguage == null, "no engine language known (a 1.2.1 config)");
+        int reconfirm = 0;
+        rig.Agent.ReconfirmNeeded += () => reconfirm++;
+        rig.Ocr.LanguageTag = "ar-SA";
+        var rec = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);
+        Assert.True(rec.QrPrinted && reconfirm == 0, "no forced reconfirm: " + rec.Status);
+        Assert.Equal("ar-SA", rig.Cfg.Current.FieldsOcrLanguage, "language recorded on the first read");
+        rig.Ocr.LanguageTag = "en-US";
+        await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);
+        Assert.Equal(1, reconfirm, "a later change still asks again");
     }
 }

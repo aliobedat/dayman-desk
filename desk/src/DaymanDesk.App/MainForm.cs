@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Text;
+using System.Text.RegularExpressions;
 using DaymanDesk.Core;
 
 namespace DaymanDesk.App;
@@ -53,6 +56,84 @@ static class Ui
         if (!SemVer.SafeUrl(url)) return;
         try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
     }
+
+    /// <summary>
+    /// WO-91: U+206F NOMINAL DIGIT SHAPES. Windows with an Arabic locale and native digits draws 0-9 as ١٠٠١ in every
+    /// GDI text (labels, lists, menus, message boxes, the tray tooltip); GDI draws the digits after this invisible
+    /// mark as 0-9 whatever that setting (it is stronger than ETO_NUMERICSLATIN). Project rule: Latin digits only.
+    /// </summary>
+    public const char Nods = '⁯';
+    public const string NodsText = "⁯";
+    static readonly Regex DigitRun = new(@"(?<![0-9⁯])(?=[0-9])", RegexOptions.Compiled);
+
+    /// <summary>The text with Latin digits for display: Arabic-Indic digits become 0-9, «٫» becomes '.', and U+206F
+    /// goes before each digit run (each line of a wrapped label keeps it). Idempotent.</summary>
+    public static string Latin(string? s)
+    {
+        if (string.IsNullOrEmpty(s)) return s ?? "";
+        var sb = new StringBuilder(s.Length + 4);
+        foreach (char ch in s)
+        {
+            if (ch >= '٠' && ch <= '٩') sb.Append((char)('0' + (ch - '٠')));
+            else if (ch >= '۰' && ch <= '۹') sb.Append((char)('0' + (ch - '۰')));
+            else if (ch == '٫') sb.Append('.');
+            else sb.Append(ch);
+        }
+        return DigitRun.Replace(sb.ToString(), NodsText);
+    }
+
+    /// <summary>
+    /// Keeps the digits of every label, button, check box, tab and form title under <paramref name="root"/> Latin,
+    /// now and on every later Text change (text boxes are LatinTextBox; list items and the tray call Latin).
+    /// </summary>
+    public static void LatinDigits(Control root)
+    {
+        if (root is Label or ButtonBase or TabPage or GroupBox or Form)
+        {
+            FixDigits(root);
+            root.TextChanged += (_, _) => FixDigits(root);
+        }
+        foreach (Control child in root.Controls) LatinDigits(child);
+        root.ControlAdded += (_, e) => { if (e.Control != null) LatinDigits(e.Control); };
+    }
+
+    static void FixDigits(Control c)
+    {
+        string t = c.Text, l = Latin(t);
+        if (l != t) c.Text = l;
+    }
+}
+
+/// <summary>
+/// WO-91: a text box whose digits show as 0-9 on Arabic Windows with native digits. Its window text starts with
+/// U+206F (Ui.Nods); Text and MaxLength hide it from the code, so what the owner typed reads back unchanged.
+/// </summary>
+sealed class LatinTextBox : TextBox
+{
+    [AllowNull]
+    public override string Text
+    {
+        get => base.Text.Replace(Ui.NodsText, "");
+        set => base.Text = string.IsNullOrEmpty(value) ? "" : Ui.NodsText + value.Replace(Ui.NodsText, "");
+    }
+
+    public override int MaxLength { get => base.MaxLength - 1; set => base.MaxLength = value + 1; }
+
+    protected override void OnTextChanged(EventArgs e)
+    {
+        string t = base.Text;
+        string want = t.Length == 0 ? "" : Ui.NodsText + t.Replace(Ui.NodsText, "");
+        if (t != want)
+        {
+            // Typed or pasted text: one mark at the start, the caret stays after what was typed.
+            int caret = Math.Clamp(SelectionStart, 0, t.Length);
+            int marksBefore = t[..caret].Count(ch => ch == Ui.Nods);
+            base.Text = want; // raises TextChanged again, with the final text
+            SelectionStart = Math.Clamp(caret - marksBefore + 1, 0, want.Length);
+            return;
+        }
+        base.OnTextChanged(e);
+    }
 }
 
 /// <summary>A white card with a 1px line border and a heading (no shadows, per the design system).</summary>
@@ -105,8 +186,8 @@ sealed class MainForm : Form
 
     // «وضع الشبكة»: POS devices without Windows print to this PC, which forwards to the real printer.
     readonly CheckBox _netOn = new() { Text = "تفعيل وضع الشبكة", AutoSize = true, Font = Ui.Strong, Margin = new Padding(4, 8, 4, 4) };
-    readonly TextBox _netPrinter = new() { Width = 170, MaxLength = 15, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
-    readonly TextBox _netPort = new() { Width = 70, MaxLength = 5, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
+    readonly LatinTextBox _netPrinter = new() { Width = 170, MaxLength = 15, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
+    readonly LatinTextBox _netPort = new() { Width = 70, MaxLength = 5, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
     readonly Button _netSave = Ui.Secondary("حفظ وضع الشبكة");
     readonly Label _netIp = Ui.Text("", Ui.Strong, Ui.Ink, CardWidth - 60);
     readonly Button _refresh = Ui.Secondary("تحديث القائمة");
@@ -122,12 +203,12 @@ sealed class MainForm : Form
 
     // Pairing tab
     readonly Label _pairStatus = Ui.Text("", Ui.Strong, Ui.Ink, CardWidth - 60);
-    readonly TextBox _code = new() { Width = 130, MaxLength = 6, CharacterCasing = CharacterCasing.Upper, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
-    readonly TextBox _deviceName = new() { Width = 180, Text = "كاشير 1", MaxLength = 40, Font = Ui.Body, Margin = new Padding(4, 8, 4, 4) };
+    readonly LatinTextBox _code = new() { Width = 130, MaxLength = 6, CharacterCasing = CharacterCasing.Upper, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
+    readonly LatinTextBox _deviceName = new() { Width = 180, Text = "كاشير 1", MaxLength = 40, Font = Ui.Body, Margin = new Padding(4, 8, 4, 4) };
     readonly Button _pair = Ui.Primary("ربط");
     readonly Label _fieldsStatus = Ui.Text("", Ui.Body, Ui.Ink, CardWidth - 60);
     readonly Button _reconfirm = Ui.Secondary("إعادة تأكيد الحقول");
-    readonly TextBox _url = new() { Width = 380, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
+    readonly LatinTextBox _url = new() { Width = 380, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
     readonly Button _saveUrl = Ui.Secondary("حفظ العنوان");
 
     // Help tab
@@ -153,6 +234,8 @@ sealed class MainForm : Form
         tabs.TabPages.Add(StatusTab());
         tabs.TabPages.Add(ReceiptsTab());
         tabs.TabPages.Add(PairTab());
+        // WO-91: a device revoked in the dashboard unlocks pairing at once, not at the next 5-minute heartbeat.
+        tabs.SelectedIndexChanged += (_, _) => { if (tabs.SelectedIndex == 2) RefreshFromServer(); };
         tabs.TabPages.Add(HelpTab());
 
         Controls.Add(tabs);
@@ -175,14 +258,16 @@ sealed class MainForm : Form
         {
             _tray.ShowBalloonTip(5000, "دايماً ديسك", "أكّد سطر رقم الفاتورة وسطر المجموع ليبدأ تسجيل الفواتير.", ToolTipIcon.Info);
             ShowWindow();
-            OpenConfirm(p);
+            OpenConfirm(_rt.Agent.PendingConfirmation ?? p);
         });
+        _rt.ReconfirmNeeded += () => BeginInvokeSafe(() =>
+            _tray.ShowBalloonTip(5000, "دايماً ديسك", "تغيّرت لغة قراءة فواتير الصورة: أكّد الحقول مرة أخرى في الفاتورة التالية.", ToolTipIcon.Warning));
         _rt.UpdateAvailable += (v, _) => BeginInvokeSafe(() =>
         {
             RefreshState();
             if (_announcedUpdate == v) return;
             _announcedUpdate = v;
-            _tray.ShowBalloonTip(5000, "دايماً ديسك", $"يوجد تحديث: الإصدار {v}. افتح البرنامج للتنزيل.", ToolTipIcon.Info);
+            _tray.ShowBalloonTip(5000, "دايماً ديسك", Ui.Latin($"يوجد تحديث: الإصدار {v}. افتح البرنامج للتنزيل."), ToolTipIcon.Info);
         });
         Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => _rt.ExitRestore();
 
@@ -193,6 +278,7 @@ sealed class MainForm : Form
         }
         Shown += (_, _) => { if (startHidden) Hide(); LoadPrinters(); LoadNetwork(); RefreshState(); };
         RefreshState();
+        Ui.LatinDigits(this);
     }
 
     // ---------- layout ----------
@@ -256,7 +342,15 @@ sealed class MainForm : Form
         var page = Page("الحالة", out var stack);
 
         _refresh.Click += (_, _) => LoadPrinters();
-        _start.Click += (_, _) => RunBusy(() => _rt.Install(CheckedPrinters()),
+        _printers.ItemCheck += (_, e) =>
+        {
+            if (e.NewValue == CheckState.Checked && _printers.Items[e.Index] is PrinterItem { Refused: true } p)
+            {
+                e.NewValue = CheckState.Unchecked;
+                Msg($"«{p.Name}» لا تصلح طابعةَ فواتير ({p.Note}). اختر طابعة الفواتير الحقيقية.", MessageBoxIcon.Warning);
+            }
+        };
+        _start.Click += (_, _) => RunBusy(() => _rt.Install(CheckedPrinters()), InstallFailed,
             "تم التشغيل. كل فاتورة تمر الآن عبر دايماً ديسك وتُطبع كالمعتاد.", needsPrinter: true);
         _stop.Click += (_, _) => StopAndRestore();
         stack.Controls.Add(new Card("طابعات الفواتير", CardWidth).Add(
@@ -311,8 +405,9 @@ sealed class MainForm : Form
         listHost.Controls.Add(_list);
         var export = new LinkLabel { Text = "تصدير العينات إلى سطح المكتب", AutoSize = true, LinkColor = Ui.Ink, Margin = new Padding(4, 8, 4, 4) };
         export.LinkClicked += (_, _) => ExportSamples();
-        var logs = new LinkLabel { Text = "فتح مجلد السجل", AutoSize = true, LinkColor = Ui.Ink, Margin = new Padding(16, 8, 4, 4) };
-        logs.LinkClicked += (_, _) => { try { Process.Start(new ProcessStartInfo(Path.Combine(Runtime.DataDir, "logs")) { UseShellExecute = true }); } catch { } };
+        var logs = new LinkLabel { Text = "فتح السجل", AutoSize = true, LinkColor = Ui.Ink, Margin = new Padding(16, 8, 4, 4) };
+        // WO-91: Notepad from this (elevated) program opens the log in the locked data folder without an Explorer prompt.
+        logs.LinkClicked += (_, _) => { try { Process.Start("notepad.exe", "\"" + _rt.Log.CurrentPath + "\""); } catch { } };
         var bottom = Ui.Row(Ui.Text("آخر 100 فاتورة منذ تشغيل البرنامج.", Ui.Body, Ui.Muted), export, logs);
         bottom.Dock = DockStyle.Bottom;
         page.Controls.Add(listHost);
@@ -357,7 +452,7 @@ sealed class MainForm : Form
         var page = Page("مساعدة", out var stack);
         string[] steps =
         {
-            "1. نزّل الملف DaymanDesk.exe وشغّله، ووافق على صلاحيات المدير. إن ظهر تحذير Windows فاضغط More info ثم Run anyway لمتابعة التشغيل.",
+            "1. نزّل الملف DaymanDesk.exe وشغّله، ووافق على صلاحيات المدير. إن ظهر تحذير Windows فاضغط More info ثم Run anyway لمتابعة التشغيل. بعدها تجد «دايماً ديسك» في قائمة Start، وأيقونته بجانب الساعة (إن لم تظهر فاضغط السهم ^).",
             "2. ضع علامة على طابعة الفواتير (أو أكثر) في تبويب «الحالة» واضغط «تشغيل دايماً ديسك». تبقى الفواتير تُطبع كالمعتاد. إن كان جهاز الكاشير تابلت أو جهازاً بلا Windows ففعّل «وضع الشبكة».",
             "3. أنشئ رمز ربط من لوحة التحكم ← الإعدادات ← دايماً ديسك، واكتبه في تبويب «الربط» ثم اضغط «ربط».",
             "4. اطبع فاتورة من برنامج الكاشير، ثم أكّد في نافذة «تأكيد الحقول» سطر رقم الفاتورة وسطر المجموع.",
@@ -381,6 +476,14 @@ sealed class MainForm : Form
 
     // ---------- state ----------
 
+    /// <summary>WO-91: a heartbeat now (a revoked device is unpaired at once), then the window again.</summary>
+    void RefreshFromServer() => Task.Run(async () =>
+    {
+        try { await _rt.Agent.HeartbeatAsync(); }
+        catch (Exception ex) { _rt.Log.Warn("heartbeat from the pairing tab: " + ex.Message); }
+        BeginInvokeSafe(RefreshState);
+    });
+
     void BeginInvokeSafe(Action a)
     {
         if (IsDisposed || !IsHandleCreated) return;
@@ -403,15 +506,17 @@ sealed class MainForm : Form
                 var port = DeskConfig.IsDaymanPort(p.PortName)
                     ? _rt.Cfg.Current.Printers.FirstOrDefault(r => r.PrinterName == p.Name)?.OriginalPort ?? p.PortName
                     : p.PortName;
-                _printers.Items.Add(new PrinterItem(p.Name, port), chosen.Contains(p.Name));
+                // WO-91: PDF/XPS, OneNote, fax and shared printers are listed with why, and cannot be ticked.
+                string? note = p.Unsupported is { } why ? "لا تصلح: " + why : p.FilePort ? "منفذ ملف: للتجربة فقط" : null;
+                _printers.Items.Add(new PrinterItem(p.Name, port, note, p.Unsupported != null), chosen.Contains(p.Name) && p.Unsupported == null);
             }
             if (_printers.Items.Count == 0) Msg("لم يُعثر على أي طابعة. تأكد أن طابعة الفواتير معرّفة في Windows ثم اضغط «تحديث القائمة».", MessageBoxIcon.Warning);
         }));
     }
 
-    sealed record PrinterItem(string Name, string Port)
+    sealed record PrinterItem(string Name, string Port, string? Note = null, bool Refused = false)
     {
-        public override string ToString() => Port.Length > 0 ? $"{Name}   ({Port})" : Name;
+        public override string ToString() => Ui.Latin((Port.Length > 0 ? $"{Name}   ({Port})" : Name) + (Note != null ? "   [" + Note + "]" : ""));
     }
 
     List<string> CheckedPrinters() => _printers.CheckedItems.OfType<PrinterItem>().Select(p => p.Name).ToList();
@@ -431,7 +536,7 @@ sealed class MainForm : Form
         if (!int.TryParse(_netPort.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int port)) port = 0;
         string host = _netPrinter.Text.Trim();
         string ips = string.Join("، ", PassThroughServer.LocalIPv4());
-        RunBusy(() => _rt.SetNetworkMode(on, host, port, DeskConfig.ListenPort),
+        RunBusy(() => _rt.SetNetworkMode(on, host, port, DeskConfig.ListenPort), "بقي وضع الشبكة كما كان قبل الحفظ.",
             on ? $"تم تفعيل وضع الشبكة. اكتب في جهاز الكاشير عنوان الطابعة {ips} والمنفذ {port}، ثم اطبع فاتورة للتجربة."
                : "أُوقف وضع الشبكة. أعد في جهاز الكاشير عنوان الطابعة الحقيقي.",
             after: LoadNetwork);
@@ -445,7 +550,10 @@ sealed class MainForm : Form
         var net = c.Network.Route();
         bool netOn = net != null && _rt.Server.IsRunning(net.Id);
 
-        if (on && c.Paired && c.FieldsConfirmed) SetHeadline("يعمل: كل فاتورة تمر عبر دايماً ديسك ويُطبع لها QR.", Ui.Success);
+        if (on && c.Paired && c.FieldsConfirmed && !c.QrEnabled) SetHeadline("يعمل: تُسجَّل الفواتير بلا QR (أوقف صاحب المحل QR من لوحة التحكم).", Ui.Warning);
+        else if (on && c.Paired && c.FieldsConfirmed && c.LastPrintKind == "image" && c.LastProblem == Problems.OcrUnavailable)
+            SetHeadline("يعمل، لكن قراءة فواتير الصورة غير مثبّتة: بلا QR. انظر «آخر مشكلة».", Ui.Warning);
+        else if (on && c.Paired && c.FieldsConfirmed) SetHeadline("يعمل: كل فاتورة تمر عبر دايماً ديسك ويُطبع لها QR.", Ui.Success);
         else if (on && c.Paired) SetHeadline("يعمل: بانتظار «تأكيد الحقول» في أول فاتورة.", Ui.Warning);
         else if (on) SetHeadline("يعمل بلا ربط: تُطبع الفواتير كالمعتاد بلا QR. اربط الجهاز من تبويب «الربط».", Ui.Warning);
         else SetHeadline("متوقف: الطابعة تطبع مباشرة بلا دايماً ديسك.", Ui.Muted);
@@ -477,7 +585,8 @@ sealed class MainForm : Form
                 : "صورة (يقرؤها البرنامج بقراءة النص من الصورة)",
             _ => "لم تُطبع فاتورة بعد",
         };
-        _info["QR بعد الفاتورة"].Text = !c.Paired ? "بعد ربط الجهاز" : c.QrEnabled ? "يعمل" : "أوقفه صاحب المحل من لوحة التحكم";
+        _info["QR بعد الفاتورة"].Text = !c.Paired ? "بعد ربط الجهاز" : !c.QrEnabled ? "أوقفه صاحب المحل من لوحة التحكم"
+            : !c.FieldsConfirmed ? "بعد «تأكيد الحقول» في أول فاتورة" : "يعمل";
         int q = _rt.Queue.Count;
         _info["بانتظار الإرسال"].Text = q == 0 ? "لا شيء" : q.ToString(CultureInfo.InvariantCulture) + " (تُرسل عند عودة الاتصال)";
         _info["الإصدار"].Text = Runtime.Version + (c.UpdateVersion != null ? $"  (يوجد تحديث: {c.UpdateVersion})" : "  (أحدث إصدار)");
@@ -517,10 +626,11 @@ sealed class MainForm : Form
         _updateBanner.Visible = c.UpdateVersion != null && c.UpdateUrl != null;
         _updateText.Text = $"يوجد تحديث: الإصدار {c.UpdateVersion}. نزّله ثم أغلق البرنامج من الأيقونة بجانب الساعة وشغّل الملف الجديد.";
         _trayUpdate.Visible = _updateBanner.Visible;
-        _trayUpdate.Text = $"يوجد تحديث: الإصدار {c.UpdateVersion}";
+        _trayUpdate.Text = Ui.Latin($"يوجد تحديث: الإصدار {c.UpdateVersion}");
 
         string tray = on ? (c.Paired ? "دايماً ديسك: يعمل" : "دايماً ديسك: يعمل بلا ربط") : "دايماً ديسك: متوقف";
         if (c.UpdateVersion != null) tray += " (يوجد تحديث)";
+        tray = Ui.Latin(tray);
         _tray.Text = tray.Length > 63 ? tray[..63] : tray; // NotifyIcon.Text is limited to 63 characters
     }
 
@@ -541,12 +651,12 @@ sealed class MainForm : Form
 
     void AddReceipt(ReceiptRecord r)
     {
-        var item = new ListViewItem(r.At.ToString("HH:mm:ss", CultureInfo.InvariantCulture));
+        var item = new ListViewItem(Ui.Latin(r.At.ToString("HH:mm:ss", CultureInfo.InvariantCulture)));
         item.SubItems.Add(r.KindLabel);
-        item.SubItems.Add(r.InvoiceNo ?? "-");
-        item.SubItems.Add(r.Total?.ToString("0.000", CultureInfo.InvariantCulture) ?? "-");
-        item.SubItems.Add(r.Kind != ReceiptKind.Unknown && !r.NonReceipt && r.Confidence > 0 ? ((int)Math.Round(r.Confidence * 100)).ToString(CultureInfo.InvariantCulture) + "%" : "-");
-        item.SubItems.Add(r.Status);
+        item.SubItems.Add(Ui.Latin(r.InvoiceNo ?? "-"));
+        item.SubItems.Add(Ui.Latin(r.Total?.ToString("0.000", CultureInfo.InvariantCulture) ?? "-"));
+        item.SubItems.Add(Ui.Latin(r.Kind != ReceiptKind.Unknown && !r.NonReceipt && r.Confidence > 0 ? ((int)Math.Round(r.Confidence * 100)).ToString(CultureInfo.InvariantCulture) + "%" : "-"));
+        item.SubItems.Add(Ui.Latin(r.Status));
         if (!r.Registered && r.Status.Contains("بلا QR")) item.ForeColor = Ui.Muted;
         _list.Items.Insert(0, item);
         while (_list.Items.Count > 100) _list.Items.RemoveAt(_list.Items.Count - 1);
@@ -563,6 +673,7 @@ sealed class MainForm : Form
             using var dlg = new ConfirmFieldsForm(p, (i, t) => _rt.ConfirmFields(p, i, t));
             if (dlg.ShowDialog(this) == DialogResult.OK)
                 Msg("حُفظ التأكيد. من الآن تُسجَّل كل فاتورة ويُطبع لها QR.", MessageBoxIcon.Information);
+            else _rt.Agent.DismissConfirmation(); // «لاحقاً»: the next receipt opens the window fresh (WO-91)
         }
         finally { _confirmOpen = false; }
         RefreshState();
@@ -571,10 +682,13 @@ sealed class MainForm : Form
     void StopAndRestore()
     {
         if (!Ask("سترجع طابعات الفواتير إلى منافذها الأصلية، ويتوقف وضع الشبكة ودايماً ديسك عن العمل على هذا الجهاز. هل تريد المتابعة؟")) return;
-        RunBusy(_rt.StopAndRestore, "أُعيدت الطابعات إلى منافذها الأصلية وتوقف دايماً ديسك. تُطبع الفواتير الآن مباشرة. إن كان وضع الشبكة مفعّلاً فأعد في جهاز الكاشير عنوان الطابعة الحقيقي.", after: LoadNetwork);
+        RunBusy(_rt.StopAndRestore, "لم نتأكد من إرجاع كل الطابعات. اضغط «إيقاف وإرجاع الطابعة» مرة أخرى، أو أرجع منفذ الطابعة يدوياً كما في تبويب «مساعدة».", "أُعيدت الطابعات إلى منافذها الأصلية وتوقف دايماً ديسك. تُطبع الفواتير الآن مباشرة. إن كان وضع الشبكة مفعّلاً فأعد في جهاز الكاشير عنوان الطابعة الحقيقي.", after: LoadNetwork);
     }
 
-    void RunBusy(Action work, string done, bool needsPrinter = false, Action? after = null)
+    const string InstallFailed = "أعاد البرنامج الطابعات إلى منافذها. إن لم تطبع الفواتير فاضغط «إيقاف وإرجاع الطابعة» في تبويب «مساعدة».";
+
+    /// <param name="failed">WO-91: what is true after this action failed (never a claim the action cannot back).</param>
+    void RunBusy(Action work, string failed, string done, bool needsPrinter = false, Action? after = null)
     {
         if (_busy) return;
         if (needsPrinter && _printers.CheckedItems.Count == 0)
@@ -595,7 +709,7 @@ sealed class MainForm : Form
             {
                 _rt.Log.Error("ui action: " + ex.Message);
                 string text = ex is SetupException se ? se.Arabic : "حدث خطأ غير متوقع.";
-                Msg(text + "\n\nالطابعة تطبع مباشرة كما كانت. التفاصيل في سجل البرنامج (تبويب «الفواتير» ← فتح مجلد السجل).", MessageBoxIcon.Error);
+                Msg(text + "\n\n" + failed + " التفاصيل في سجل البرنامج (تبويب «الفواتير» ← فتح السجل).", MessageBoxIcon.Error);
             }
             else Msg(done, MessageBoxIcon.Information);
         }));
@@ -605,9 +719,9 @@ sealed class MainForm : Form
     {
         if (!_pair.Enabled) return;
         string code = _code.Text.Trim();
-        if (code.Length != 6 || !code.All(char.IsLetterOrDigit))
+        if (DeskAgent.PairCodeProblem(code) is { } problem)
         {
-            Msg("رمز الربط 6 خانات من حروف وأرقام. انسخه كما يظهر في لوحة التحكم.", MessageBoxIcon.Warning);
+            Msg(problem, MessageBoxIcon.Warning);
             return;
         }
         string name = string.IsNullOrWhiteSpace(_deviceName.Text) ? "كاشير" : _deviceName.Text.Trim();
@@ -648,12 +762,12 @@ sealed class MainForm : Form
     void Msg(string text, MessageBoxIcon icon)
     {
         if (Preview) return;
-        MessageBox.Show(this, text, "دايماً ديسك", MessageBoxButtons.OK, icon, MessageBoxDefaultButton.Button1,
+        MessageBox.Show(this, Ui.Latin(text), "دايماً ديسك", MessageBoxButtons.OK, icon, MessageBoxDefaultButton.Button1,
             MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
     }
 
     bool Ask(string text) => !Preview &&
-        MessageBox.Show(this, text, "دايماً ديسك", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2,
+        MessageBox.Show(this, Ui.Latin(text), "دايماً ديسك", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2,
             MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign) == DialogResult.Yes;
 
     void ShowWindow()

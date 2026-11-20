@@ -99,6 +99,14 @@ public sealed class DeskConfig
     public bool FieldsConfirmed { get; set; }
     public LearnedField? LearnedInvoice { get; set; }
     public LearnedField? LearnedTotal { get; set; }
+    /// <summary>WO-91: the OCR language of an image receipt the fields were confirmed on; another language asks again.</summary>
+    public string? FieldsOcrLanguage { get; set; }
+
+    /// <summary>
+    /// WO-91: «خروج» put every printer back on its own port (confirmed). The watchdog then has nothing to restore and
+    /// starts no PowerShell; cleared before any printer is pointed at the program again.
+    /// </summary>
+    public bool RestoredAtExit { get; set; }
 
     // Update check (heartbeat latestVersion / downloadUrl); null when this build is current.
     public string? UpdateVersion { get; set; }
@@ -119,7 +127,8 @@ public sealed class DeskConfig
     public List<string> UnknownFormatsReported { get; set; } = new();
 
     public bool Paired => !string.IsNullOrEmpty(DeviceToken);
-    public static string RawQueueFor(string printer) => $"Dayman Raw ({printer})";
+    /// <summary>The raw queue on the real port; WO-91: its name tells the POS user not to pick it.</summary>
+    public static string RawQueueFor(string printer) => $"Dayman Raw ({printer}) - لا تختر هذه الطابعة";
 
     /// <summary>A v1.0 file: its single printer becomes the first route.</summary>
     internal void MigrateLegacy()
@@ -133,7 +142,7 @@ public sealed class DeskConfig
             Printers.Add(new PrinterRoute
             {
                 PrinterName = PrinterName, OriginalPort = OriginalPort, OriginalDriver = OriginalDriver,
-                RawQueueName = RawQueueName ?? RawQueueFor(PrinterName), ListenPort = ListenPort,
+                RawQueueName = RawQueueName ?? $"Dayman Raw ({PrinterName})", ListenPort = ListenPort, // the 1.0 name
             });
     }
 

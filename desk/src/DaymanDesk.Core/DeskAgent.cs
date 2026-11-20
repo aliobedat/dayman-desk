@@ -32,6 +32,8 @@ public sealed class FieldConfirmation
     public DateTimeOffset At { get; init; }
     /// <summary>The lines were read by OCR from an image receipt (the OCR rules of the extractor apply).</summary>
     public bool FromImage { get; init; }
+    /// <summary>The OCR language that read it (FromImage only).</summary>
+    public string? OcrLanguage { get; init; }
 }
 
 /// <summary>Problems the status window shows, each with what the cashier or the owner should do.</summary>
@@ -154,7 +156,8 @@ public sealed class DeskAgent
     enum ImageRead { NotImage, NoOcr, Undecodable, NoEngine, Read }
 
     /// <param name="printerUnreachable">The TCP/IP printer did not answer and the job went to the spooler queue: no QR.</param>
-    public async Task<ReceiptRecord> ProcessJobAsync(byte[] job, long forwardMs, long seqAfterForward, bool printerUnreachable = false)
+    /// <param name="printedNothing">WO-91: called when the job is a printer command, not paper (it releases its sequence).</param>
+    public async Task<ReceiptRecord> ProcessJobAsync(byte[] job, long forwardMs, long seqAfterForward, bool printerUnreachable = false, Action? printedNothing = null)
     {
         var at = _now();
         LastForwardMs = forwardMs;
@@ -170,6 +173,7 @@ public sealed class DeskAgent
             analysis = ReceiptAnalyzer.Analyze(job);
             lines = analysis.Lines;
             if (analysis.Kind == ReceiptKind.Image) image = await ReadImageAsync(job, (a, b) => { lines = a; second = b; }).ConfigureAwait(false);
+            if (image == ImageRead.Read) CheckOcrLanguage();
             var c0 = _cfg.Current;
             if (analysis.Kind == ReceiptKind.Text || image == ImageRead.Read)
             {
@@ -182,6 +186,13 @@ public sealed class DeskAgent
                     var ext2 = ReceiptExtractor.Extract(second, c0.FieldsConfirmed ? c0.LearnedInvoice : null, c0.FieldsConfirmed ? c0.LearnedTotal : null, ocr: true);
                     ocrAgree = ext2.InvoiceNo == ext.InvoiceNo && ext2.Total == ext.Total;
                 }
+            }
+            // WO-91: a drawer kick, an init or a status query sent as a print job: a few control bytes, no picture.
+            else if (analysis.Kind == ReceiptKind.Unknown && analysis.Format is "escpos-other" or "empty" && analysis.TextChars < 20)
+            {
+                nonReceipt = true;
+                // It printed no receipt: the previous receipt's pending QR may still print (PassThroughServer.Release).
+                printedNothing?.Invoke();
             }
         }
         catch (Exception ex)
@@ -199,6 +210,7 @@ public sealed class DeskAgent
             At = at, Kind = analysis.Kind, InvoiceNo = ext?.InvoiceNo, Total = ext?.Total, Confidence = ext?.Confidence ?? 0,
             NonReceipt = nonReceipt,
         };
+        var after = new List<Func<Task>>();
         _log.Info($"job {job.Length} B, forward {forwardMs} ms, {analysis.Kind} ({analysis.Reason}){(image != ImageRead.NotImage ? ", image " + image : "")}{(nonReceipt ? ", not a receipt" : "")}, invoice {(ext?.InvoiceNo != null ? "found" : "none")} {ext?.InvoiceConfidence:0.00}, total {(ext?.Total != null ? "found" : "none")} {ext?.TotalConfidence:0.00}");
 
         try
@@ -212,7 +224,7 @@ public sealed class DeskAgent
                     if (analysis.CodeTable != null) c.CodeTable = analysis.CodeTable;
                 }
             });
-            await HandleAsync(job, forwardMs, seqAfterForward, analysis, lines, image, ext, rec, printerUnreachable, ocrAgree).ConfigureAwait(false);
+            await HandleAsync(job, forwardMs, seqAfterForward, analysis, lines, image, ext, rec, printerUnreachable, ocrAgree, after).ConfigureAwait(false);
             // WO-90: after a registered receipt (never before its QR) the pool is topped up; offline the heartbeat does it.
             if (rec.Registered) await RefillPoolAsync().ConfigureAwait(false);
         }
@@ -221,6 +233,12 @@ public sealed class DeskAgent
             rec.Status = "خطأ داخلي: بلا QR";
             _log.Error("process failed: " + ex);
             await ReportAsync("error", "crash", "process: " + ex.GetType().Name + ": " + ex.Message).ConfigureAwait(false);
+        }
+        // WO-91: the sample and slow-forward reports go after the slip, never before it.
+        foreach (var report in after)
+        {
+            try { await report().ConfigureAwait(false); }
+            catch (Exception ex) { _log.Warn("deferred report: " + ex.Message); }
         }
         bool paired = _cfg.Current.Paired;
         // A kitchen or order ticket is not a receipt: not counted at all.
@@ -264,18 +282,18 @@ public sealed class DeskAgent
     }
 
     async Task HandleAsync(byte[] job, long forwardMs, long seq, AnalysisResult analysis, IReadOnlyList<string> lines, ImageRead image,
-        ExtractResult? ext, ReceiptRecord rec, bool printerUnreachable, bool ocrAgree)
+        ExtractResult? ext, ReceiptRecord rec, bool printerUnreachable, bool ocrAgree, List<Func<Task>> after)
     {
         var cfg = _cfg.Current;
         if (forwardMs > 300)
         {
             _log.Warn($"slow forward: {forwardMs} ms");
-            await ReportAsync("warn", "slow_forward", $"forward {forwardMs} ms for {job.Length} bytes").ConfigureAwait(false);
+            after.Add(() => ReportAsync("warn", "slow_forward", $"forward {forwardMs} ms for {job.Length} bytes"));
         }
         if (rec.NonReceipt)
         {
             // WO-89: forwarded and nothing else (no QR, no report, no sample, not a failure).
-            rec.Status = "ليست فاتورة (طلب مطبخ أو تحضير): بلا QR";
+            rec.Status = analysis.Kind == ReceiptKind.Unknown ? "ليست فاتورة (أمر قصير للطابعة): بلا QR" : "ليست فاتورة (طلب مطبخ أو تحضير): بلا QR";
             return;
         }
         if (printerUnreachable)
@@ -288,7 +306,8 @@ public sealed class DeskAgent
         if (cfg.Paired && cfg.SamplesSent < FirstSamples)
         {
             _cfg.Update(c => c.SamplesSent++);
-            await ReportAsync("info", "sample", Summary(analysis, ext, image), job, force: true).ConfigureAwait(false);
+            string summary = Summary(analysis, ext, image);
+            after.Add(() => ReportAsync("info", "sample", summary, job, force: true));
         }
         if (!cfg.Paired)
         {
@@ -326,10 +345,14 @@ public sealed class DeskAgent
         if (!cfg.FieldsConfirmed)
         {
             // The first receipt after pairing: the owner confirms the two fields before anything registers.
+            // WO-91: the newest receipt replaces the pending one (a better print after a garbled one is the one
+            // «تأكيد الحقول» shows); only a receipt with nothing pending (the first, or after «لاحقاً») opens the window.
             FieldConfirmation? raise = null;
+            var fresh = BuildConfirmation(lines, ext, fromImage, fromImage ? _ocr?.LanguageTag : null);
             lock (_lock)
             {
-                if (_pending == null) _pending = raise = BuildConfirmation(lines, ext, fromImage);
+                if (_pending == null) raise = fresh;
+                _pending = fresh;
             }
             rec.Status = "بانتظار «تأكيد الحقول»: بلا QR";
             if (raise != null)
@@ -592,7 +615,7 @@ public sealed class DeskAgent
         await ReportAsync("warn", "unknown_format", $"format {format}: {reason}, first bytes {head}", job, force: true).ConfigureAwait(false);
     }
 
-    static FieldConfirmation BuildConfirmation(IReadOnlyList<string> lines, ExtractResult? ext, bool fromImage)
+    static FieldConfirmation BuildConfirmation(IReadOnlyList<string> lines, ExtractResult? ext, bool fromImage, string? ocrLanguage)
     {
         int inv = -1, tot = -1;
         if (ext?.InvoiceNo != null)
@@ -619,6 +642,7 @@ public sealed class DeskAgent
             Total = tot >= 0 ? ext!.Total : null,
             At = DateTimeOffset.Now,
             FromImage = fromImage,
+            OcrLanguage = ocrLanguage,
         };
     }
 
@@ -637,19 +661,27 @@ public sealed class DeskAgent
     public string? ConfirmFields(FieldConfirmation p, int invoiceLine, int totalLine)
     {
         if (invoiceLine == totalLine && invoiceLine >= 0) return "اختر سطرين مختلفين لرقم الفاتورة والمجموع.";
-        var inv = ReceiptExtractor.LearnInvoice(p.Lines, invoiceLine, invoiceLine == p.InvoiceLine ? p.InvoiceNo : null);
-        if (inv == null) return "السطر المختار لرقم الفاتورة لا يحوي رقماً. اختر السطر الذي يظهر فيه رقم الفاتورة.";
-        var tot = ReceiptExtractor.LearnTotal(p.Lines, totalLine);
-        if (tot == null) return "السطر المختار للمجموع لا يحوي مبلغاً. اختر السطر الذي يظهر فيه المجموع النهائي.";
-        // The learned labels must find the same values on this very receipt, or later receipts would go wrong.
+        // WO-91: the same rule as the window (ReceiptExtractor.*LineProblem), so a value it shows is never refused here.
+        if (ReceiptExtractor.InvoiceLineProblem(p.Lines, invoiceLine) is { } invProblem) return invProblem;
+        if (ReceiptExtractor.TotalLineProblem(p.Lines, totalLine) is { } totProblem) return totProblem;
+        var inv = ReceiptExtractor.LearnInvoice(p.Lines, invoiceLine, invoiceLine == p.InvoiceLine ? p.InvoiceNo : null)!;
+        var tot = ReceiptExtractor.LearnTotal(p.Lines, totalLine)!;
+        // WO-91: shapes only count together, so when one field has no letter label both are learned by shape.
+        bool invShape = inv.Value.field.Shape != null, totShape = tot.Value.field.Shape != null;
+        if (invShape && !totShape) tot = ReceiptExtractor.LearnTotal(p.Lines, totalLine, forceShape: true) ?? tot;
+        if (totShape && !invShape) inv = ReceiptExtractor.LearnInvoice(p.Lines, invoiceLine, invoiceLine == p.InvoiceLine ? p.InvoiceNo : null, forceShape: true) ?? inv;
+        // The learned labels must find the same values on this very receipt, confidently (a shape that repeats on the
+        // receipt is not), or later receipts would go wrong.
         var check = ReceiptExtractor.Extract(p.Lines, inv.Value.field, tot.Value.field, ocr: p.FromImage);
-        if (check.InvoiceNo != inv.Value.value || check.Total != tot.Value.value)
+        if (check.InvoiceNo != inv.Value.value || check.Total != tot.Value.value
+            || check.InvoiceConfidence < MinConfidence || check.TotalConfidence < MinConfidence)
             return "يتكرر عنوان السطر المختار في الفاتورة. اختر السطر الأقرب إلى العنوان الصحيح، أو تواصل مع دعم دايماً.";
         _cfg.Update(c =>
         {
             c.LearnedInvoice = inv.Value.field;
             c.LearnedTotal = tot.Value.field;
             c.FieldsConfirmed = true;
+            c.FieldsOcrLanguage = p.FromImage ? p.OcrLanguage : null;
         });
         lock (_lock) _pending = null;
         _log.Info($"fields confirmed (invoice line {invoiceLine}, total line {totalLine}, of {p.Lines.Count})");
@@ -657,12 +689,60 @@ public sealed class DeskAgent
         return null;
     }
 
+    /// <summary>«لاحقاً» in «تأكيد الحقول» (WO-91): drop the pending receipt; the next receipt opens the window fresh.</summary>
+    public void DismissConfirmation()
+    {
+        lock (_lock) _pending = null;
+        _log.Info("field confirmation postponed by owner");
+    }
+
     /// <summary>«إعادة تأكيد الحقول»: forget the learned fields; the next text receipt asks again.</summary>
     public void RequestReconfirm()
     {
-        _cfg.Update(c => { c.FieldsConfirmed = false; c.LearnedInvoice = null; c.LearnedTotal = null; });
+        _cfg.Update(c => { c.FieldsConfirmed = false; c.LearnedInvoice = null; c.LearnedTotal = null; c.FieldsOcrLanguage = null; });
         lock (_lock) _pending = null;
         _log.Info("fields confirmation reset by owner");
+    }
+
+    /// <summary>Raised when the learned fields were dropped because the OCR language changed (the UI says «أكّد الحقول مرة أخرى»).</summary>
+    public event Action? ReconfirmNeeded;
+
+    /// <summary>
+    /// WO-91: fields confirmed on an image receipt belong to the OCR language that read it. Arabic OCR often arrives
+    /// after the first receipts (Windows Update); its lines differ from the English read, so the learned labels would
+    /// stop matching (no QR, silently). Another language: forget the fields and ask again on this very receipt.
+    /// </summary>
+    void CheckOcrLanguage()
+    {
+        var c = _cfg.Current;
+        string? now = _ocr?.LanguageTag;
+        if (!c.FieldsConfirmed || now == null) return;
+        if (c.FieldsOcrLanguage == null)
+        {
+            // Confirmed before 1.2.2 (or on a text receipt): this read's language becomes the one the fields belong to.
+            _cfg.Update(x => x.FieldsOcrLanguage = now);
+            return;
+        }
+        if (now == c.FieldsOcrLanguage) return;
+        _log.Warn($"ocr language changed ({c.FieldsOcrLanguage} -> {now}): fields must be confirmed again");
+        RequestReconfirm();
+        ReconfirmNeeded?.Invoke();
+    }
+
+    const string PairAlphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+    /// <summary>
+    /// WO-91: the pairing code as the server makes it (6 characters of PairAlphabet, case-insensitive). Null when
+    /// valid, else the Arabic reason; Arabic letters mean the keyboard is on Arabic.
+    /// </summary>
+    public static string? PairCodeProblem(string? code)
+    {
+        string c = (code ?? "").Trim().ToUpperInvariant();
+        if (c.Any(TextNormalizer.IsArabicLetter))
+            return "لوحة المفاتيح على العربية. بدّل لوحة المفاتيح إلى الإنجليزية (Alt+Shift) ثم اكتب رمز الربط.";
+        if (c.Length != 6 || !c.All(ch => PairAlphabet.Contains(ch)))
+            return "رمز الربط 6 خانات من حروف إنجليزية وأرقام (بلا 0 ولا 1 ولا O ولا I ولا L). انسخه كما يظهر في لوحة التحكم.";
+        return null;
     }
 
     static string Summary(AnalysisResult a, ExtractResult? e, ImageRead image) =>

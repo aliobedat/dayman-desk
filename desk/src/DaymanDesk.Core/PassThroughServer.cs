@@ -14,7 +14,8 @@ public interface IRawQueue
 
 /// <param name="Seq">Unique across routes: a QR slip prints only while it is still its route's last job.</param>
 /// <param name="PrinterUnreachable">The direct TCP/IP printer did not answer: the job went to the spooler queue instead.</param>
-public sealed record ForwardedJob(PrinterRoute Route, byte[] Data, long ForwardMs, long Seq, bool PrinterUnreachable);
+/// <param name="PrevSeq">The route's sequence before this job (WO-91: Release puts it back for a job that printed nothing).</param>
+public sealed record ForwardedJob(PrinterRoute Route, byte[] Data, long ForwardMs, long Seq, bool PrinterUnreachable, long PrevSeq = -1);
 
 /// <summary>
 /// The listeners, one per route (WO-89). A Windows route listens on 127.0.0.1:port where its POS printer queue now
@@ -119,6 +120,17 @@ public sealed class PassThroughServer
         return false;
     }
 
+    /// <summary>
+    /// WO-91: the job <paramref name="seq"/> turned out to print nothing (a printer command, not a receipt): if no
+    /// other job came after it, the receipt before it is current again and its pending QR may still print.
+    /// </summary>
+    public void Release(long seq, long prevSeq)
+    {
+        foreach (var lane in _lanes.Values)
+            lock (lane.Lock)
+                if (lane.LastSeq == seq) { lane.LastSeq = prevSeq; return; }
+    }
+
     async Task AcceptLoop(Lane lane)
     {
         var ct = lane.Cts.Token;
@@ -170,15 +182,23 @@ public sealed class PassThroughServer
     {
         var route = lane.Route;
         var sw = Stopwatch.StartNew();
-        long seq;
+        long seq, prev;
         bool unreachable = false;
+        // WO-91: a job under 16 bytes (a drawer kick, an init) is not a receipt: forwarded, not analysed, and it does
+        // not cancel the previous receipt's QR (no paper came out between them).
+        bool tiny = data.Length < JobThreshold;
         try
         {
             lock (lane.Lock)
             {
                 // Bumped under the same lock as the QR check: a pending QR can never print after a newer job.
-                seq = Interlocked.Increment(ref _seq);
-                lane.LastSeq = seq;
+                prev = lane.LastSeq;
+                if (tiny) seq = lane.LastSeq;
+                else
+                {
+                    seq = Interlocked.Increment(ref _seq);
+                    lane.LastSeq = seq;
+                }
                 if (route.DirectHost != null)
                 {
                     try { SendDirect(route.DirectHost, route.DirectPort, data); }
@@ -201,8 +221,9 @@ public sealed class PassThroughServer
         }
         long ms = sw.ElapsedMilliseconds;
         if (ms > 300) _log.Warn($"forward took {ms} ms ({data.Length} B)");
+        if (tiny) return;
         var handler = JobForwarded;
-        if (handler != null) _ = Task.Run(() => handler(new ForwardedJob(route, data, ms, seq, unreachable)));
+        if (handler != null) _ = Task.Run(() => handler(new ForwardedJob(route, data, ms, seq, unreachable, prev)));
     }
 
     /// <summary>
@@ -247,7 +268,7 @@ public sealed class PassThroughServer
                 });
                 var capture = new MemoryStream();
                 var chunk = new byte[64 * 1024];
-                long seq = 0, maxMs = 0, total = 0;
+                long seq = 0, prev = -1, maxMs = 0, total = 0;
                 bool counted = false, failed = false;
                 while (true)
                 {
@@ -267,6 +288,7 @@ public sealed class PassThroughServer
                         {
                             lock (lane.Lock)
                             {
+                                prev = lane.LastSeq;
                                 seq = Interlocked.Increment(ref _seq);
                                 lane.LastSeq = seq;
                                 counted = true;
@@ -290,7 +312,7 @@ public sealed class PassThroughServer
                 if (failed) { PrinterUnreachable?.Invoke(route, "dropped"); return; }
                 if (!counted) return;
                 var handler = JobForwarded;
-                if (handler != null) _ = Task.Run(() => handler(new ForwardedJob(route, capture.ToArray(), maxMs, seq, false)));
+                if (handler != null) _ = Task.Run(() => handler(new ForwardedJob(route, capture.ToArray(), maxMs, seq, false, prev)));
             }
         }
     }

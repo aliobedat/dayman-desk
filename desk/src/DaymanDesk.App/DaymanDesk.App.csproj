@@ -12,7 +12,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DaymanDesk</AssemblyName>
     <RootNamespace>DaymanDesk.App</RootNamespace>
-    <Version>1.2.1</Version>
+    <Version>1.2.2</Version>
     <Product>دايماً ديسك</Product>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>

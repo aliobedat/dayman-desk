@@ -55,11 +55,13 @@ static class Program
             // No token protector and no Update: the watchdog never writes config.json, so it never writes the token.
             var store = new ConfigStore(cfgPath); // falls back to config.json.bak
             var cfg = store.Current;
-            if (cfg.Printers.Count == 0 && !cfg.Network.Enabled) return 0;
+            // WO-91: after a confirmed «خروج» restore the printers are on their own ports: nothing to watch, no PowerShell.
+            bool printersIdle = cfg.Printers.Count == 0 || cfg.RestoredAtExit;
+            if (printersIdle && !cfg.Network.Enabled) return 0;
             var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
             bool Listening(int port) => listeners.Any(e => e.Port == port && (IPAddress.IsLoopback(e.Address) || e.Address.Equals(IPAddress.Any)));
             bool networkDown = Watchdog.NetworkDown(cfg, Listening);
-            if (cfg.Printers.All(r => Listening(r.ListenPort)) && !networkDown) return 0;
+            if ((printersIdle || cfg.Printers.All(r => Listening(r.ListenPort))) && !networkDown) return 0;
             var log = new RollingLog(Path.Combine(Runtime.DataDir, "logs"));
             if (store.LoadedFromBackup) log.Warn("watchdog: config.json unreadable, using config.json.bak");
             var shell = new PowerShellShell(log);
@@ -69,6 +71,7 @@ static class Program
                 log.Warn($"watchdog: nothing listens on network-mode port {cfg.Network.ListenPort}, starting the tray task");
                 shell.Run(ScheduledTasks.StartTrayScript());
             }
+            if (printersIdle) return 0;
             try { Watchdog.Run(cfg, new PrinterSetup(shell, log), Listening, log); }
             catch (Exception ex) { log.Error("watchdog: restore not confirmed: " + ex.Message); return 1; }
             return 0;

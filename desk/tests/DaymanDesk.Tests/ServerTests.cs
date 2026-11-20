@@ -303,7 +303,7 @@ public static class SetupTests
         Assert.True(store.Current.Active, "active");
         Assert.Equal("USB001", store.Current.OriginalPort, "original saved");
         Assert.Equal("POS-80 Driver", store.Current.OriginalDriver, "driver saved");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Add-Printer -Name 'Dayman Raw (POS-80)' -DriverName 'Generic / Text Only' -PortName 'USB001'")), "raw queue on original port");
+        Assert.True(sh.Scripts.Any(s => s.Contains("Add-Printer -Name '" + DeskConfig.RawQueueFor("POS-80") + "' -DriverName 'Generic / Text Only' -PortName 'USB001'")), "raw queue on original port");
         Assert.True(sh.Scripts.Any(s => s.Contains("Add-PrinterPort -Name 'DAYMAN_9100' -PrinterHostAddress '127.0.0.1' -PortNumber 9100")), "tcp port");
         Assert.True(sh.Scripts.Last().StartsWith("Set-Printer -Name 'POS-80' -PortName 'DAYMAN_9100'"), "switch is the last step");
     }
@@ -319,7 +319,7 @@ public static class SetupTests
         Assert.True(threw, "threw");
         Assert.Equal("USB001", sh.Port, "printer untouched");
         Assert.True(!store.Current.Active, "inactive");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Remove-Printer -Name 'Dayman Raw (POS-80)'")), "raw queue removed");
+        Assert.True(sh.Scripts.Any(s => s.Contains("Remove-Printer -Name '" + DeskConfig.RawQueueFor("POS-80") + "'")), "raw queue removed");
     }
 
     public static void TestListenerBusyRollsBack()

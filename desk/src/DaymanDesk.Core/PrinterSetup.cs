@@ -68,6 +68,33 @@ public sealed class PowerShellShell : IShell
 public sealed record PrinterInfo(string Name, string PortName, string DriverName, string? Host = null, int PortNumber = 0, int Protocol = 0)
 {
     public bool RawTcp => !string.IsNullOrWhiteSpace(Host) && PortNumber > 0 && Protocol == 1;
+
+    /// <summary>
+    /// WO-91: why this queue can never be a receipt printer (PDF/XPS writers, OneNote, fax, a shared printer of another
+    /// PC, the nul port), or null. The list shows it with this note and «تشغيل» refuses it.
+    /// </summary>
+    public string? Unsupported
+    {
+        get
+        {
+            string port = PortName.Trim(), name = Name, driver = DriverName;
+            if (name.StartsWith(@"\\", StringComparison.Ordinal) || port.StartsWith(@"\\", StringComparison.Ordinal))
+                return "طابعة مشتركة من جهاز آخر: ثبّت البرنامج على الجهاز الموصولة به";
+            if (port.StartsWith("PORTPROMPT:", StringComparison.OrdinalIgnoreCase) || port.StartsWith("XPSPort:", StringComparison.OrdinalIgnoreCase)
+                || driver.Contains("PDF", StringComparison.OrdinalIgnoreCase) || driver.Contains("XPS", StringComparison.OrdinalIgnoreCase))
+                return "تحفظ ملفاً ولا تطبع ورقاً";
+            if (name.Contains("OneNote", StringComparison.OrdinalIgnoreCase) || driver.Contains("OneNote", StringComparison.OrdinalIgnoreCase))
+                return "OneNote ليست طابعة";
+            if (port.StartsWith("SHRFAX:", StringComparison.OrdinalIgnoreCase) || driver.Contains("Fax", StringComparison.OrdinalIgnoreCase))
+                return "فاكس ليس طابعة فواتير";
+            if (port.Equals("nul:", StringComparison.OrdinalIgnoreCase) || port.Equals("nul", StringComparison.OrdinalIgnoreCase))
+                return "لا منفذ لها";
+            return null;
+        }
+    }
+
+    /// <summary>The FILE: port prints to a file: allowed (for tests on an office PC), with a note.</summary>
+    public bool FilePort => PortName.Trim().Equals("FILE:", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed class SetupException : Exception
@@ -139,6 +166,26 @@ public sealed class PrinterSetup
         return r.Ok ? r.Stdout.Trim() : null;
     }
 
+    /// <summary>
+    /// WO-91: true only when Windows answers that the printer does not exist (deleted after the install), as opposed
+    /// to a port that could not be read (then the restore is not confirmed).
+    /// </summary>
+    public bool Missing(string printer)
+    {
+        // A stopped spooler lists no printer at all: that is «unreadable», never «missing».
+        var r = _sh.Run(MissingScript(printer));
+        bool missing = r.Ok && r.Stdout.Trim() == "missing";
+        if (missing) SkippedMissing = true;
+        return missing;
+    }
+
+    public static string MissingScript(string printer) =>
+        "if ((Get-Service -Name Spooler).Status -ne 'Running') { 'spooler' } " +
+        $"elseif (@(Get-Printer -ErrorAction Stop | ForEach-Object {{ $_.Name }}) -contains {Q(printer)}) {{ 'present' }} else {{ 'missing' }}";
+
+    /// <summary>WO-91: a restore since the last reset skipped a printer deleted from Windows (the watchdog keeps watching).</summary>
+    public bool SkippedMissing { get; set; }
+
     /// <summary>The smallest listen port from 9100 that is not taken.</summary>
     public static int FreePort(IEnumerable<int> taken)
     {
@@ -175,6 +222,9 @@ public sealed class PrinterSetup
             var p = list.FirstOrDefault(x => x.Name == name) ?? throw new SetupException($"لم تُوجد الطابعة «{name}».");
             if (p.Name.StartsWith("Dayman Raw (", StringComparison.Ordinal))
                 throw new SetupException("اختر طابعة الفواتير نفسها، لا طابعة دايماً.");
+            if (p.Unsupported is { } why)
+                throw new SetupException($"«{name}» لا تصلح طابعةَ فواتير ({why}). اختر طابعة الفواتير الحقيقية.");
+            if (p.FilePort) _log?.Warn($"install: «{name}» prints to FILE: (a test setup, not a shop printer)");
             var known = old.FirstOrDefault(r => r.PrinterName == name);
             PrinterRoute route;
             if (DeskConfig.IsDaymanPort(p.PortName))
@@ -248,8 +298,9 @@ public sealed class PrinterSetup
     public bool Restore(PrinterRoute route)
     {
         if (route.Lan || string.IsNullOrEmpty(route.PrinterName) || string.IsNullOrEmpty(route.OriginalPort)) return false;
-        var port = GetPort(route.PrinterName)
-            ?? throw new SetupException($"تعذّرت قراءة منفذ الطابعة «{route.PrinterName}»، فلم نتأكد من إرجاعها.");
+        var port = GetPort(route.PrinterName);
+        if (port == null && Missing(route.PrinterName)) { _log?.Warn($"printer «{route.PrinterName}» no longer exists: nothing to restore"); return false; }
+        if (port == null) throw new SetupException($"تعذّرت قراءة منفذ الطابعة «{route.PrinterName}»، فلم نتأكد من إرجاعها.");
         if (!DeskConfig.IsDaymanPort(port)) return false;
         var r = _sh.Run($"Set-Printer -Name {Q(route.PrinterName)} -PortName {Q(route.OriginalPort)}");
         if (!r.Ok) throw new SetupException("تعذّر إرجاع الطابعة إلى منفذها الأصلي: " + route.OriginalPort, r.Stderr);
@@ -304,6 +355,7 @@ public sealed class PrinterSetup
         foreach (var r in cfg.Printers.Where(r => !string.IsNullOrEmpty(r.PrinterName) && !string.IsNullOrEmpty(r.OriginalPort)))
         {
             var port = GetPort(r.PrinterName!);
+            if (port == null && Missing(r.PrinterName!)) continue; // deleted from Windows: nothing to restore
             if (port == null || DeskConfig.IsDaymanPort(port))
                 throw new SetupException("لم نتأكد من إرجاع الطابعة إلى منفذها الأصلي: " + r.OriginalPort);
         }

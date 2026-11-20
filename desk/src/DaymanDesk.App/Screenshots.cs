@@ -41,6 +41,17 @@ static class Screenshots
             Pump();
             Save(dlg, Path.Combine(dir, "confirm.png"));
             dlg.Close();
+
+            // WO-91: the field receipt of the «Generic / Text Only» driver (every Arabic letter a '.').
+            var garbled = new[] { "...... ", "... ........: 1001", ".... 2.500", ".........: 2.500" };
+            var pg = new FieldConfirmation { Lines = garbled, InvoiceLine = 1, TotalLine = 3, InvoiceNo = "1001", Total = 2.500m, At = DateTimeOffset.Now };
+            using var dlg2 = new ConfirmFieldsForm(pg, (_, _) => null);
+            dlg2.StartPosition = FormStartPosition.Manual;
+            dlg2.Show();
+            Pump();
+            Save(dlg2, Path.Combine(dir, "confirm-garbled.png"));
+            dlg2.Close();
+            DigitCheck(Path.Combine(dir, "digits.png"));
             form.Hide();
             return 0;
         }
@@ -49,6 +60,26 @@ static class Screenshots
             File.WriteAllText(Path.Combine(dir, "error.txt"), ex.ToString());
             return 1;
         }
+    }
+
+    /// <summary>
+    /// WO-91: CI sets an Arabic user locale with national digits before this run. Row 1 (no mark) shows what that
+    /// setting does to plain GDI text; row 2 is Ui.Latin; row 3 is GDI+ with digit substitution off, for comparison.
+    /// </summary>
+    static void DigitCheck(string path)
+    {
+        using var bmp = new Bitmap(560, 150);
+        using (var g = Graphics.FromImage(bmp))
+        {
+            g.Clear(Color.White);
+            const TextFormatFlags f = TextFormatFlags.RightToLeft | TextFormatFlags.Right | TextFormatFlags.NoPrefix;
+            TextRenderer.DrawText(g, "1. بلا علامة: 1001 و 2.500", Ui.Body, new Rectangle(10, 10, 540, 40), Color.Black, f);
+            TextRenderer.DrawText(g, Ui.Latin("2. Ui.Latin: 1001 و 2.500"), Ui.Body, new Rectangle(10, 55, 540, 40), Color.Black, f);
+            using var sf = new StringFormat(StringFormatFlags.DirectionRightToLeft);
+            sf.SetDigitSubstitution(0, StringDigitSubstitute.None);
+            g.DrawString("3. GDI+ None: 1001 و 2.500", Ui.Body, Brushes.Black, new RectangleF(10, 100, 540, 40), sf);
+        }
+        bmp.Save(path, ImageFormat.Png);
     }
 
     static void Pump()

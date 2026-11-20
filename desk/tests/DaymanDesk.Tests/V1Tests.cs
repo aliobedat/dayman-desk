@@ -55,6 +55,159 @@ public static class ConfirmationTests
         Assert.Equal(1, rig.Asked.Count, "a second receipt while pending does not ask again");
         Assert.Equal(0, rig.Receipts, "still not registered");
         Assert.True(rig.Agent.PendingConfirmation != null, "pending kept for the status window");
+        Assert.True(!ReferenceEquals(rig.Agent.PendingConfirmation, p), "WO-91: the newest receipt replaces the pending one");
+    }
+
+    // ---------- WO-91: the «Generic / Text Only» driver prints every Arabic letter as '.' ----------
+
+    static readonly string[] Garbled = { "...... ", "... ........: 1001", ".... 2.500", ".........: 2.500" };
+
+    public static void TestShapeLabelLearnsGarbledLines()
+    {
+        var inv = ReceiptExtractor.LearnInvoice(Garbled, 1);
+        Assert.True(inv != null && inv.Value.value == "1001", "invoice learned from a line without letters");
+        Assert.Equal("... ........: 9", inv!.Value.field.Shape, "invoice shape");
+        Assert.True(!inv.Value.field.ValueOnNextLine && inv.Value.field.Label == "", "same line, no letter label");
+        var tot = ReceiptExtractor.LearnTotal(Garbled, 3);
+        Assert.True(tot != null && tot.Value.value == 2.500m, "total learned");
+        Assert.Equal(".........: 9", tot!.Value.field.Shape, "total shape");
+
+        var later = new[] { "...... ", "... ........: 1002", ".... 3.000", ".... 1.250", ".........: 4.250" };
+        var e = ReceiptExtractor.Extract(later, inv.Value.field, tot.Value.field);
+        Assert.Equal("1002", e.InvoiceNo, "invoice by shape");
+        Assert.Equal<decimal?>(4.250m, e.Total, "total by shape, not the item line");
+        Assert.True(e.Confidence >= DeskAgent.MinConfidence, "unique shapes count as learned: " + e.Confidence);
+    }
+
+    public static void TestRepeatedShapeGivesNoConfidence()
+    {
+        var inv = ReceiptExtractor.LearnInvoice(Garbled, 1)!.Value.field;
+        var tot = ReceiptExtractor.LearnTotal(Garbled, 3)!.Value.field;
+        // A paid line with as many letters as the total line: two lines of the total's shape.
+        var twoTotals = new[] { "...... ", "... ........: 1003", ".... 2.500", ".........: 2.500", ".........: 5.000" };
+        var e = ReceiptExtractor.Extract(twoTotals, inv, tot);
+        Assert.Equal("1003", e.InvoiceNo, "invoice still unique");
+        Assert.True(e.TotalConfidence < DeskAgent.MinConfidence, "ambiguous total: no qr: " + e.TotalConfidence);
+        var twoInvoices = new[] { "...... ", "... ........: 1004", "... ........: 77", ".........: 2.500" };
+        Assert.True(ReceiptExtractor.Extract(twoInvoices, inv, tot).InvoiceConfidence < DeskAgent.MinConfidence, "ambiguous invoice: no qr");
+        // Never bare position: the shape missing on a receipt is no match.
+        var other = new[] { "...... ", "..: 1005", ".... 2.500", ".......: 2.500" };
+        var o = ReceiptExtractor.Extract(other, inv, tot);
+        Assert.True(o.InvoiceConfidence < DeskAgent.MinConfidence && o.TotalConfidence < DeskAgent.MinConfidence, "other shapes: no qr");
+    }
+
+    public static async Task TestGarbledReceiptConfirmsAndRegisters()
+    {
+        var rig = new Rig();
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Ascii(Garbled), 5, 1);
+        Assert.Equal(1, rig.Asked.Count, "asked");
+        var p = rig.Asked[0];
+        Assert.Equal<string?>(null, rig.Agent.ConfirmFields(p, 1, 3), "the field's «تأكيد وحفظ» now saves");
+        Assert.True(rig.Cfg.Current.LearnedInvoice!.Shape != null, "shape stored");
+
+        var rec = await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Ascii(new[] { "...... ", "... ........: 1002", ".... 3.000", ".........: 3.000" }), 5, 1);
+        Assert.True(rec.QrPrinted, "registered and qr: " + rec.Status);
+        Assert.Equal("1002", rig.LastInvoice, "invoice");
+        Assert.Equal("3.000", rig.LastAmount, "amount");
+
+        int before = rig.Receipts;
+        var dup = await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Ascii(new[] { "...... ", "... ........: 1003", ".........: 2.000", ".........: 3.000" }), 5, 1);
+        Assert.True(!dup.QrPrinted && rig.Receipts == before, "two lines of the total's shape: no qr, not sent");
+    }
+
+    public static async Task TestConfirmValidationMatchesTheWindow()
+    {
+        var rig = new Rig();
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Ascii(Garbled), 5, 1);
+        var p = rig.Asked[0];
+        for (int i = 0; i < Garbled.Length; i++)
+        {
+            // The window shows a value exactly when it accepts the line, and saving never says «لا يحوي» for it.
+            bool shows = ReceiptExtractor.LearnInvoice(p.Lines, i) != null;
+            Assert.Equal(shows, ReceiptExtractor.InvoiceLineProblem(p.Lines, i) == null, "invoice rule, line " + i);
+            bool showsTotal = ReceiptExtractor.LearnTotal(p.Lines, i) != null;
+            Assert.Equal(showsTotal, ReceiptExtractor.TotalLineProblem(p.Lines, i) == null, "total rule, line " + i);
+            int other = i == 3 ? 2 : 3;
+            var err = rig.Agent.ConfirmFields(p, i, other);
+            if (shows) Assert.True(err == null || !err.Contains("لا يحوي رقماً"), "never «لا يحوي رقماً» for a shown value, line " + i);
+            rig.Agent.RequestReconfirm();
+        }
+        // A shape that repeats on the confirmed receipt itself is refused with the repeat message.
+        var twice = new[] { "...... ", "... ........: 1001", ".........: 2.500", ".........: 2.500" };
+        var pt = new FieldConfirmation { Lines = twice, InvoiceLine = 1, TotalLine = 3 };
+        Assert.True(rig.Agent.ConfirmFields(pt, 1, 3)!.Contains("يتكرر"), "repeated shape refused");
+    }
+
+    public static void TestShapeLookAlikesInAZReportGiveNoQr()
+    {
+        var inv = ReceiptExtractor.LearnInvoice(Garbled, 1)!.Value.field;
+        var tot = ReceiptExtractor.LearnTotal(Garbled, 3)!.Value.field;
+        // A Z/X report from the same POS: lines with the same letter counts, near the same places.
+        var z = new[] { "...... ", ". .......", "... ........: 57", "....: 20/11/2026", "......: 12", ".........: 812.500", "..... ......: 3", "... ....... .......: 0" };
+        var e = ReceiptExtractor.Extract(z, inv, tot);
+        Assert.True(e.InvoiceConfidence < DeskAgent.MinConfidence && e.TotalConfidence < DeskAgent.MinConfidence, $"z report: no qr ({e.InvoiceConfidence}, {e.TotalConfidence})");
+        // Same neighbours, but the total line far from its place (a refund slip with lines after the total).
+        var far = new[] { "...... ", "... ........: 1020", ".... 2.500", ".........: 2.500", ".... .....", "... .......", "........ ...." };
+        Assert.True(ReceiptExtractor.Extract(far, inv, tot).Confidence < DeskAgent.MinConfidence, "total moved more than 2 lines: no qr");
+        // Never one field by shape alone: the invoice matches, the total line is missing.
+        var half = new[] { "...... ", "... ........: 1021", ".... 2.500", "......: 2.500" };
+        var h = ReceiptExtractor.Extract(half, inv, tot);
+        Assert.True(h.InvoiceNo == "1021" && h.InvoiceConfidence < DeskAgent.MinConfidence, "the invoice alone does not count");
+    }
+
+    public static void TestShapeFieldsSurviveExtraItemLines()
+    {
+        var inv = ReceiptExtractor.LearnInvoice(Garbled, 1)!.Value.field;
+        var tot = ReceiptExtractor.LearnTotal(Garbled, 3)!.Value.field;
+        for (int extra = 1; extra <= 3; extra++)
+        {
+            var lines = new List<string> { "...... ", "... ........: 1030" };
+            for (int i = 0; i <= extra; i++) lines.Add("........ 1.000");
+            lines.Add(".........: " + (extra + 1) + ".000");
+            var e = ReceiptExtractor.Extract(lines, inv, tot);
+            Assert.True(e.Confidence >= DeskAgent.MinConfidence && e.InvoiceNo == "1030" && e.Total == extra + 1, $"{extra} extra item lines still match");
+        }
+    }
+
+    public static async Task TestMixedLabelsAreBothLearnedByShape()
+    {
+        var rig = new Rig();
+        var mixed = new[] { "...... ", "... ........: 1001", ".... 2.500", "Total: 2.500" };
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Ascii(mixed), 5, 1);
+        Assert.Equal<string?>(null, rig.Agent.ConfirmFields(rig.Asked[0], 1, 3), "confirmed");
+        Assert.True(rig.Cfg.Current.LearnedInvoice!.Shape != null && rig.Cfg.Current.LearnedTotal!.Shape == "total: 9", "both by shape, never mixed");
+        var rec = await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Ascii(new[] { "...... ", "... ........: 1002", ".... 4.000", "Total: 4.000" }), 5, 1);
+        Assert.True(rec.QrPrinted, "registers: " + rec.Status);
+    }
+
+    public static void TestOldLetterLabelConfigUnchanged()
+    {
+        // A 1.2.1 config: no "shape" property.
+        var json = "{\"label\":\"رقم الفاتوره\",\"valueOnNextLine\":false,\"position\":3,\"tokenIndex\":0}";
+        var f = JsonSerializer.Deserialize<LearnedField>(json, DeskApiClient.Json)!;
+        Assert.True(f.Shape == null, "no shape");
+        var e = ReceiptExtractor.Extract(DaymanDesk.Tests.Receipts.Arabic, f, null);
+        Assert.Equal("10432", e.InvoiceNo, "letter label still matches");
+        Assert.Equal(ReceiptExtractor.LearnedConfidence, e.InvoiceConfidence, "learned confidence");
+        // Letter labels stay first when present.
+        var inv = ReceiptExtractor.LearnInvoice(DaymanDesk.Tests.Receipts.Arabic, 3);
+        Assert.True(inv != null && inv.Value.field.Shape == null && inv.Value.field.Label == "رقم الفاتوره", "letter label learned, no shape");
+    }
+
+    public static async Task TestNewestReceiptReplacesPendingAndLaterClearsIt()
+    {
+        var rig = new Rig();
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Ascii(Garbled), 5, 1);
+        Assert.Equal(1, rig.Asked.Count, "the garbled one asked");
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Cp1256(DaymanDesk.Tests.Receipts.Arabic), 5, 1);
+        Assert.Equal(1, rig.Asked.Count, "no second window while one is pending");
+        Assert.True(rig.Agent.PendingConfirmation!.Lines.Any(l => l.Contains("10432")), "the better, newer receipt is pending");
+
+        rig.Agent.DismissConfirmation(); // «لاحقاً»
+        Assert.True(rig.Agent.PendingConfirmation == null, "cleared");
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Cp1256(DaymanDesk.Tests.Receipts.Arabic), 5, 1);
+        Assert.Equal(2, rig.Asked.Count, "the next receipt opens the window fresh");
+        Assert.Equal("10432", rig.Asked[1].InvoiceNo, "fresh receipt detected");
     }
 
     public static async Task TestConfirmAsDetectedThenRegisters()

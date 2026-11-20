@@ -21,8 +21,19 @@ public sealed class ExtractResult
 /// </summary>
 public sealed class LearnedField
 {
-    /// <summary>ReceiptExtractor.LabelKey of the label line.</summary>
+    /// <summary>ReceiptExtractor.LabelKey of the label line ("" when the field was learned by its shape).</summary>
     public string Label { get; set; } = "";
+    /// <summary>
+    /// WO-91: ReceiptExtractor.ShapeKey of the label line, set only when it had no letters (a driver or code page
+    /// that turns every Arabic letter into '.'). Null in configs learned before 1.2.2 and for letter labels.
+    /// </summary>
+    public string? Shape { get; set; }
+    /// <summary>
+    /// WO-91, shape fields only: the shape of the line next to the field at confirmation (invoice: the line above its
+    /// label; total: the line after its value; "" when there is none). A look-alike line elsewhere (a Z report, a
+    /// refund) has other neighbours.
+    /// </summary>
+    public string? Neighbor { get; set; }
     /// <summary>The value is on the line after the label line (the label line holds no number).</summary>
     public bool ValueOnNextLine { get; set; }
     /// <summary>Invoice: line index from the top. Total: line index from the bottom.</summary>
@@ -107,6 +118,14 @@ public static class ReceiptExtractor
             tot = FindTotal(lines, ocr);
             if (learnedTotal != null) tot.conf = Math.Min(tot.conf, UnmatchedLearnedCap);
         }
+        // WO-91: shapes only count together. Both fields learned by shape and both matched, or neither counts.
+        bool anyShape = !string.IsNullOrEmpty(learnedInvoice?.Shape) || !string.IsNullOrEmpty(learnedTotal?.Shape);
+        bool bothShape = !string.IsNullOrEmpty(learnedInvoice?.Shape) && !string.IsNullOrEmpty(learnedTotal?.Shape);
+        if (anyShape && !(bothShape && inv.conf >= LearnedConfidence && tot.conf >= LearnedConfidence))
+        {
+            inv.conf = Math.Min(inv.conf, UnmatchedLearnedCap);
+            tot.conf = Math.Min(tot.conf, UnmatchedLearnedCap);
+        }
         return new ExtractResult
         {
             InvoiceNo = inv.value,
@@ -143,6 +162,20 @@ public static class ReceiptExtractor
     static readonly Regex ClockRx = new(@"\d{1,2}:\d{2}(?::\d{2})?", RegexOptions.Compiled);
     static readonly Regex AmPmRx = new(@"(?<![\p{L}])(?:a\.?m\.?|p\.?m\.?|ص|م)(?![\p{L}])", RegexOptions.Compiled);
 
+    /// <summary>
+    /// WO-91: a line without letters reduced to its shape: normalized, every number (and time) replaced by one '9',
+    /// whitespace collapsed; punctuation, dots and garbled characters kept. «... ........: 1001» gives
+    /// «... ........: 9» whatever the invoice number, so the same label of the same POS gives the same shape.
+    /// </summary>
+    public static string ShapeKey(string raw)
+    {
+        var n = NumberRx.Replace(ClockRx.Replace(TextNormalizer.Normalize(raw), "9"), "9");
+        return string.Join(' ', n.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    /// <summary>A shape worth matching: at least two characters besides the numbers (never a bare number line).</summary>
+    static bool UsableShape(string shape) => shape.Count(c => c != ' ' && c != '9') >= 2;
+
     static readonly Regex ValueTokenRx = new(@"[a-z0-9\-/_.,#]*[0-9][a-z0-9\-/_.,#]*", RegexOptions.Compiled);
 
     /// <summary>A usable label: at least two letters, and more than a currency name («2.000 JOD» has no label).</summary>
@@ -163,39 +196,112 @@ public static class ReceiptExtractor
     /// Learns the invoice field from the line the owner chose. A line without letters (only the number) takes
     /// its label from the line above. Returns null when the chosen line holds no invoice-like token.
     /// </summary>
-    public static (LearnedField field, string value)? LearnInvoice(IReadOnlyList<string> lines, int index, string? preferredValue = null)
+    /// <param name="forceShape">WO-91: learn the shape even when the line has letters (the other field is a shape).</param>
+    public static (LearnedField field, string value)? LearnInvoice(IReadOnlyList<string> lines, int index, string? preferredValue = null, bool forceShape = false)
     {
         if (index < 0 || index >= lines.Count) return null;
         var tokens = InvoiceTokens(lines[index]);
         if (tokens.Count == 0) return null;
         int ti = 0;
         if (preferredValue != null) { int k = tokens.ToList().IndexOf(preferredValue); if (k >= 0) ti = k; }
-        var (label, next, labelIndex) = LabelFor(lines, index);
-        if (label == null) return null;
-        return (new LearnedField { Label = label, ValueOnNextLine = next, Position = labelIndex, TokenIndex = ti }, tokens[ti]);
+        var (label, shape, next, labelIndex) = LabelFor(lines, index, forceShape);
+        if (label == null && shape == null) return null;
+        return (new LearnedField
+        {
+            Label = label ?? "", Shape = shape, ValueOnNextLine = next, Position = labelIndex, TokenIndex = ti,
+            Neighbor = shape != null ? InvoiceNeighbor(lines.Select(ShapeKey).ToList(), labelIndex) : null,
+        }, tokens[ti]);
     }
 
     /// <summary>Learns the total field from the line the owner chose; null when it holds no amount.</summary>
-    public static (LearnedField field, decimal value)? LearnTotal(IReadOnlyList<string> lines, int index)
+    public static (LearnedField field, decimal value)? LearnTotal(IReadOnlyList<string> lines, int index, bool forceShape = false)
     {
         if (index < 0 || index >= lines.Count) return null;
         var amount = AmountOf(lines[index]);
         if (amount == null) return null;
-        var (label, next, labelIndex) = LabelFor(lines, index);
-        if (label == null) return null;
-        return (new LearnedField { Label = label, ValueOnNextLine = next, Position = lines.Count - 1 - labelIndex }, amount.Value);
+        var (label, shape, next, labelIndex) = LabelFor(lines, index, forceShape);
+        if (label == null && shape == null) return null;
+        return (new LearnedField
+        {
+            Label = label ?? "", Shape = shape, ValueOnNextLine = next, Position = lines.Count - 1 - labelIndex,
+            Neighbor = shape != null ? TotalNeighbor(lines.Select(ShapeKey).ToList(), labelIndex, next) : null,
+        }, amount.Value);
     }
 
-    static (string? label, bool next, int labelIndex) LabelFor(IReadOnlyList<string> lines, int index)
+    /// <summary>The shape of the line above the invoice label, or "".</summary>
+    static string InvoiceNeighbor(IReadOnlyList<string> shapes, int labelIndex) => labelIndex > 0 ? shapes[labelIndex - 1] : "";
+
+    /// <summary>The shape of the line after the total's value, or "".</summary>
+    static string TotalNeighbor(IReadOnlyList<string> shapes, int labelIndex, bool valueOnNext)
+    {
+        int n = labelIndex + (valueOnNext ? 2 : 1);
+        return n < shapes.Count ? shapes[n] : "";
+    }
+
+    /// <summary>WO-91: a shape field may move this many lines (an extra item line, a longer header) and no more.</summary>
+    public const int ShapeDrift = 2;
+
+    /// <summary>
+    /// The reason «تأكيد الحقول» refuses a line for the invoice number, or null when it can be learned. The window and
+    /// DeskAgent.ConfirmFields both use it (WO-91: the window never shows a value that saving then refuses).
+    /// </summary>
+    public static string? InvoiceLineProblem(IReadOnlyList<string> lines, int index)
+    {
+        if (index < 0 || index >= lines.Count) return "اضغط أولاً على سطر رقم الفاتورة في الفاتورة.";
+        if (InvoiceTokens(lines[index]).Count == 0) return "السطر المختار لرقم الفاتورة لا يحوي رقماً. اختر السطر الذي يظهر فيه رقم الفاتورة.";
+        if (LearnInvoice(lines, index) == null) return "لا يستطيع البرنامج تمييز سطر رقم الفاتورة هذا في الفواتير التالية: لا عنوان فيه ولا في السطر الذي فوقه. اختر السطر الذي يظهر فيه رقم الفاتورة مع عنوانه.";
+        return null;
+    }
+
+    /// <summary>The reason «تأكيد الحقول» refuses a line for the total, or null when it can be learned.</summary>
+    public static string? TotalLineProblem(IReadOnlyList<string> lines, int index)
+    {
+        if (index < 0 || index >= lines.Count) return "اضغط أولاً على سطر المجموع في الفاتورة.";
+        if (AmountOf(lines[index]) == null) return "السطر المختار للمجموع لا يحوي مبلغاً. اختر السطر الذي يظهر فيه المجموع النهائي.";
+        if (LearnTotal(lines, index) == null) return "لا يستطيع البرنامج تمييز سطر المجموع هذا في الفواتير التالية: لا عنوان فيه ولا في السطر الذي فوقه. اختر السطر الذي يظهر فيه المجموع مع عنوانه.";
+        return null;
+    }
+
+    /// <summary>
+    /// The label of the chosen line: its letter label, else the letter label of the line above (value on the next
+    /// line). WO-91: without letters on either, the chosen line's shape, else the shape of the line above.
+    /// </summary>
+    static (string? label, string? shape, bool next, int labelIndex) LabelFor(IReadOnlyList<string> lines, int index, bool forceShape = false)
     {
         var key = LabelKey(lines[index]);
-        if (HasLetters(key)) return (key, false, index);
-        if (index > 0)
+        if (!forceShape && HasLetters(key)) return (key, null, false, index);
+        if (!forceShape && index > 0)
         {
             var above = LabelKey(lines[index - 1]);
-            if (HasLetters(above)) return (above, true, index - 1);
+            if (HasLetters(above)) return (above, null, true, index - 1);
         }
-        return (null, false, index);
+        var shape = ShapeKey(lines[index]);
+        if (UsableShape(shape)) return (null, shape, false, index);
+        if (index > 0)
+        {
+            var aboveShape = ShapeKey(lines[index - 1]);
+            if (UsableShape(aboveShape)) return (null, aboveShape, true, index - 1);
+        }
+        return (null, null, false, index);
+    }
+
+    /// <summary>
+    /// WO-91: the lines with the learned shape, closest to the learned position first, and whether the closest one
+    /// counts as a learned match: the only line of the receipt with that shape, within ShapeDrift lines of the learned
+    /// position (invoice from the top, total from the bottom), with the same neighbouring line as at confirmation.
+    /// Otherwise the closest only tells what the receipt probably says (logged and shown), below MinConfidence: no QR.
+    /// </summary>
+    static (List<int> hits, bool counts) ShapeMatches(List<Line> lines, LearnedField f, bool fromBottom)
+    {
+        var hits = new List<int>();
+        for (int i = 0; i < lines.Count; i++) if (lines[i].Shape == f.Shape) hits.Add(i);
+        int Pos(int i) => fromBottom ? lines.Count - 1 - i : i;
+        var ordered = hits.OrderBy(i => Math.Abs(Pos(i) - f.Position)).ToList();
+        if (hits.Count != 1 || f.Neighbor == null) return (ordered, false);
+        int hit = hits[0];
+        var shapes = lines.Select(l => l.Shape).ToList();
+        string neighbor = fromBottom ? TotalNeighbor(shapes, hit, f.ValueOnNextLine) : InvoiceNeighbor(shapes, hit);
+        return (ordered, Math.Abs(Pos(hit) - f.Position) <= ShapeDrift && neighbor == f.Neighbor);
     }
 
     /// <summary>The lines whose label is the learned one, closest to the learned position first.</summary>
@@ -210,6 +316,20 @@ public static class ReceiptExtractor
 
     static (string? value, double conf, string? line) ApplyInvoice(List<Line> lines, LearnedField f)
     {
+        if (!string.IsNullOrEmpty(f.Shape))
+        {
+            var (hits, counts) = ShapeMatches(lines, f, fromBottom: false);
+            foreach (int i in hits)
+            {
+                int vi = f.ValueOnNextLine ? i + 1 : i;
+                if (vi >= lines.Count) continue;
+                var tokens = TokensWithDecimals(lines[vi].Cased, 0, lines[vi].Cased.Length);
+                // The same value position, never another number of the line.
+                if (f.TokenIndex >= tokens.Count) continue;
+                return (tokens[f.TokenIndex], counts ? LearnedConfidence : UnmatchedLearnedCap, lines[i].Raw);
+            }
+            return (null, 0, null);
+        }
         if (string.IsNullOrEmpty(f.Label)) return (null, 0, null);
         foreach (int i in Matches(lines, f, fromBottom: false))
         {
@@ -225,6 +345,18 @@ public static class ReceiptExtractor
 
     static (decimal? value, double conf, string? line) ApplyTotal(List<Line> lines, LearnedField f, bool ocr)
     {
+        if (!string.IsNullOrEmpty(f.Shape))
+        {
+            var (hits, counts) = ShapeMatches(lines, f, fromBottom: true);
+            foreach (int i in hits)
+            {
+                int vi = f.ValueOnNextLine ? i + 1 : i;
+                if (vi >= lines.Count) continue;
+                var (amount, _) = PickAmount(lines[vi].Fwd, ocr);
+                if (amount != null) return (amount, counts ? LearnedConfidence : UnmatchedLearnedCap, lines[i].Raw);
+            }
+            return (null, 0, null);
+        }
         if (string.IsNullOrEmpty(f.Label)) return (null, 0, null);
         foreach (int i in Matches(lines, f, fromBottom: true))
         {
@@ -241,11 +373,12 @@ public static class ReceiptExtractor
         public readonly string Raw, Fwd, Rev;
         /// <summary>Fwd with the original letter case, for values (same length as Fwd).</summary>
         public readonly string Cased;
-        public readonly string Key;
+        public readonly string Key, Shape;
         public Line(string raw)
         {
             Raw = raw;
             Key = LabelKey(raw);
+            Shape = ShapeKey(raw);
             Fwd = TextNormalizer.Normalize(raw);
             Cased = TextNormalizer.Normalize(raw, lower: false);
             if (Cased.Length != Fwd.Length) Cased = Fwd;

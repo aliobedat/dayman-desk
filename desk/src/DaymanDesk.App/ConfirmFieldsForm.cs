@@ -54,9 +54,10 @@ sealed class ConfirmFieldsForm : Form
         _lines.DrawItem += DrawLine;
 
         var setInvoice = Ui.Secondary("هذا سطر رقم الفاتورة");
-        setInvoice.Click += (_, _) => Choose(ref _invoice, "رقم الفاتورة", line => ReceiptExtractor.InvoiceTokens(line).Count > 0);
+        // WO-91: the same rule as «تأكيد وحفظ» (DeskAgent.ConfirmFields), so a line the window accepts is never refused.
+        setInvoice.Click += (_, _) => Choose(ref _invoice, ReceiptExtractor.InvoiceLineProblem);
         var setTotal = Ui.Secondary("هذا سطر المجموع");
-        setTotal.Click += (_, _) => Choose(ref _total, "المجموع", line => ReceiptExtractor.AmountOf(line) != null);
+        setTotal.Click += (_, _) => Choose(ref _total, ReceiptExtractor.TotalLineProblem);
 
         var values = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Ui.Canvas };
         values.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
@@ -83,9 +84,10 @@ sealed class ConfirmFieldsForm : Form
 
         if (_invoice >= 0) _lines.SelectedIndex = _invoice;
         UpdateValues();
+        Ui.LatinDigits(this);
     }
 
-    void Choose(ref int field, string name, Func<string, bool> valid)
+    void Choose(ref int field, Func<IReadOnlyList<string>, int, string?> problem)
     {
         int i = _lines.SelectedIndex;
         if (i < 0 || i >= _p.Lines.Count)
@@ -93,9 +95,9 @@ sealed class ConfirmFieldsForm : Form
             Msg("اضغط أولاً على السطر الصحيح في الفاتورة.", MessageBoxIcon.Information);
             return;
         }
-        if (!valid(_p.Lines[i]))
+        if (problem(_p.Lines, i) is { } reason)
         {
-            Msg($"هذا السطر لا يحوي {(name == "المجموع" ? "مبلغاً" : "رقماً")}. اختر السطر الذي يظهر فيه {name}.", MessageBoxIcon.Warning);
+            Msg(reason, MessageBoxIcon.Warning);
             return;
         }
         field = i;
@@ -105,13 +107,9 @@ sealed class ConfirmFieldsForm : Form
 
     void UpdateValues()
     {
-        string? inv = null;
-        if (_invoice >= 0)
-        {
-            var tokens = ReceiptExtractor.InvoiceTokens(_p.Lines[_invoice]);
-            inv = _invoice == _p.InvoiceLine && _p.InvoiceNo != null && tokens.Contains(_p.InvoiceNo) ? _p.InvoiceNo : tokens.FirstOrDefault();
-        }
-        decimal? tot = _total >= 0 ? ReceiptExtractor.AmountOf(_p.Lines[_total]) : null;
+        // Exactly the values «تأكيد وحفظ» learns: a line it cannot learn shows no value here.
+        string? inv = ReceiptExtractor.LearnInvoice(_p.Lines, _invoice, _invoice == _p.InvoiceLine ? _p.InvoiceNo : null)?.value;
+        decimal? tot = ReceiptExtractor.LearnTotal(_p.Lines, _total)?.value;
         _invoiceValue.Text = inv ?? "لم يُحدَّد. اضغط على سطر رقم الفاتورة ثم «هذا سطر رقم الفاتورة».";
         _invoiceValue.ForeColor = inv != null ? Ui.Ink : Ui.Danger;
         _totalValue.Text = tot != null ? tot.Value.ToString("0.000", CultureInfo.InvariantCulture) + " دينار" : "لم يُحدَّد. اضغط على سطر المجموع ثم «هذا سطر المجموع».";
@@ -150,10 +148,10 @@ sealed class ConfirmFieldsForm : Form
             TextRenderer.DrawText(e.Graphics, tag, Ui.Strong, tagRect, inv ? Ui.Warning : Ui.Success, rtl | TextFormatFlags.Left);
         }
         var lineRect = new Rectangle(rect.X + tagWidth, rect.Y, rect.Width - tagWidth, rect.Height);
-        TextRenderer.DrawText(e.Graphics, _p.Lines[e.Index], Ui.Mono, lineRect, Ui.Ink, rtl | TextFormatFlags.Right | TextFormatFlags.EndEllipsis);
+        TextRenderer.DrawText(e.Graphics, Ui.Latin(_p.Lines[e.Index]), Ui.Mono, lineRect, Ui.Ink, rtl | TextFormatFlags.Right | TextFormatFlags.EndEllipsis);
     }
 
     void Msg(string text, MessageBoxIcon icon) =>
-        MessageBox.Show(this, text, "تأكيد الحقول", MessageBoxButtons.OK, icon, MessageBoxDefaultButton.Button1,
+        MessageBox.Show(this, Ui.Latin(text), "تأكيد الحقول", MessageBoxButtons.OK, icon, MessageBoxDefaultButton.Button1,
             MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
 }

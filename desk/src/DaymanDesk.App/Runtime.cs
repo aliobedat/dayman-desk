@@ -28,6 +28,8 @@ sealed class Runtime : IDisposable
     public event Action? StateChanged;
     public event Action<FieldConfirmation>? ConfirmationNeeded;
     public event Action<string, string>? UpdateAvailable;
+    /// <summary>WO-91: the OCR language changed and the learned fields were dropped.</summary>
+    public event Action? ReconfirmNeeded;
 
     public Runtime()
     {
@@ -75,6 +77,7 @@ sealed class Runtime : IDisposable
         a.ReceiptProcessed += r => { ReceiptProcessed?.Invoke(r); StateChanged?.Invoke(); };
         a.ConfirmationNeeded += p => ConfirmationNeeded?.Invoke(p);
         a.UpdateAvailable += (v, u) => UpdateAvailable?.Invoke(v, u);
+        a.ReconfirmNeeded += () => { ReconfirmNeeded?.Invoke(); StateChanged?.Invoke(); };
         return a;
     }
 
@@ -142,7 +145,9 @@ sealed class Runtime : IDisposable
             try { Setup.Restore(r); }
             catch (Exception ex) { Log.Error("restore: " + ex.Message); Agent.SetProblem(Problems.RestoreFailed); }
         }
-        try { Setup.Assign(cfg, r => Server.IsRunning(r.Id)); }
+        // WO-91: before any printer points at us again, so the watchdog watches it.
+        Cfg.Update(c => c.RestoredAtExit = false);
+        try { Setup.Assign(Cfg.Current, r => Server.IsRunning(r.Id)); }
         catch (Exception ex) { Log.Error("assign at start: " + ex.Message); }
     }
 
@@ -165,6 +170,7 @@ sealed class Runtime : IDisposable
         MigrateToken();
         // A stopped earlier set may still listen on old ports: start clean (a running set keeps its ports).
         if (!Cfg.Current.Active) foreach (var r in Cfg.Current.Printers) Server.Stop(r.Id);
+        Cfg.Update(c => c.RestoredAtExit = false);
         Setup.Install(Cfg, printers, r => Server.Start(r));
         Agent.ClearProblem(Problems.ForwardFailed, Problems.ListenerBusy, Problems.RestoreFailed, Problems.UpdateInstallFailed);
         EnsureOcrLanguages();
@@ -177,6 +183,15 @@ sealed class Runtime : IDisposable
     /// </summary>
     public void SetNetworkMode(bool enabled, string? host, int listenPort, int printerPort)
     {
+        // WO-91: validate before touching the running listener; a failure later puts the previous setting back.
+        var previous = Cfg.Current.Network;
+        var prev = (on: previous.Enabled, host: previous.PrinterHost, listen: previous.ListenPort, printer: previous.PrinterPort);
+        if (enabled)
+        {
+            var routes = Cfg.Current.Active ? Cfg.Current.Printers : new List<PrinterRoute>();
+            var err = PassThroughServer.ValidateNetwork(host, listenPort, printerPort, routes, PassThroughServer.LocalIPv4());
+            if (err != null) { StateChanged?.Invoke(); throw new SetupException(err); }
+        }
         try
         {
             Server.Stop(new PrinterRoute { Lan = true }.Id);
@@ -187,9 +202,6 @@ sealed class Runtime : IDisposable
                 Agent.ClearProblem(Problems.PrinterUnreachable, Problems.ListenerBusy);
                 return;
             }
-            var routes = Cfg.Current.Active ? Cfg.Current.Printers : new List<PrinterRoute>();
-            var err = PassThroughServer.ValidateNetwork(host, listenPort, printerPort, routes, PassThroughServer.LocalIPv4());
-            if (err != null) throw new SetupException(err);
             Installer.EnsureInstalled(Shell, Log);
             MigrateToken();
             var fw = Shell.Run(Firewall.AddScript(listenPort));
@@ -200,15 +212,31 @@ sealed class Runtime : IDisposable
                 c.Network.ListenPort = listenPort; c.Network.PrinterPort = printerPort;
             });
             if (!Server.Start(Cfg.Current.Network.Route()!))
-            {
-                Cfg.Update(c => c.Network.Enabled = false);
-                Shell.Run(Firewall.RemoveScript);
                 throw new SetupException($"المنفذ {listenPort} على هذا الجهاز مستخدم من برنامج آخر. اختر منفذاً آخر.");
-            }
             Agent.ClearProblem(Problems.ListenerBusy);
             EnsureOcrLanguages();
         }
+        catch (Exception) when (enabled)
+        {
+            RestoreNetwork(prev.on, prev.host, prev.listen, prev.printer);
+            throw;
+        }
         finally { StateChanged?.Invoke(); }
+    }
+
+    /// <summary>WO-91: puts «وضع الشبكة» back as it was before a failed change (its listener and firewall rule too).</summary>
+    void RestoreNetwork(bool on, string? host, int listen, int printer)
+    {
+        try
+        {
+            Cfg.Update(c => { c.Network.Enabled = on; c.Network.PrinterHost = host; c.Network.ListenPort = listen; c.Network.PrinterPort = printer; });
+            if (!on) { Shell.Run(Firewall.RemoveScript); return; }
+            Shell.Run(Firewall.AddScript(listen));
+            if (Cfg.Current.Network.Route() is { } r && !Server.Start(r))
+                Agent.SetProblem(Problems.ListenerBusy, listen.ToString(CultureInfo.InvariantCulture));
+            Log.Warn("network mode: change failed, previous setting restored");
+        }
+        catch (Exception ex) { Log.Error("network mode: restoring the previous setting failed: " + ex.Message); }
     }
 
     /// <summary>
@@ -267,7 +295,14 @@ sealed class Runtime : IDisposable
     public void ExitRestore()
     {
         _heartbeat?.Dispose();
-        try { Setup.Restore(Cfg.Current); }
+        try
+        {
+            Setup.SkippedMissing = false;
+            Setup.Restore(Cfg.Current);
+            // WO-91: confirmed: the watchdog has nothing to restore until the next start (no PowerShell every minute).
+            // A printer skipped as deleted keeps the watchdog watching (a spooler hiccup must never look like done).
+            if (Cfg.Current.Printers.Count > 0 && !Setup.SkippedMissing) Cfg.Update(c => c.RestoredAtExit = true);
+        }
         catch (Exception ex) { Log.Error("restore at exit not confirmed (the watchdog will retry): " + ex.Message); }
         Server.StopAll();
         Log.Info("exit");
@@ -277,7 +312,7 @@ sealed class Runtime : IDisposable
     {
         try { Samples.Save(j.Data, DateTimeOffset.Now); }
         catch (Exception ex) { Log.Warn("sample save: " + ex.Message); }
-        _ = Agent.ProcessJobAsync(j.Data, j.ForwardMs, j.Seq, j.PrinterUnreachable);
+        _ = Agent.ProcessJobAsync(j.Data, j.ForwardMs, j.Seq, j.PrinterUnreachable, () => Server.Release(j.Seq, j.PrevSeq));
     }
 
     /// <summary>Prints the QR slip on the receipt's own printer, only if no job reached that printer after it.</summary>

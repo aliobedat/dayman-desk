@@ -75,6 +75,8 @@ public interface IOcr
 {
     /// <summary>The text lines top to bottom, or null when no OCR engine is available on this PC.</summary>
     Task<IReadOnlyList<string>?> ReadAsync(MonoBitmap image);
+    /// <summary>The recognizer language of the last read (WO-91: learned fields belong to it), or null.</summary>
+    string? LanguageTag => null;
 }
 
 /// <summary>

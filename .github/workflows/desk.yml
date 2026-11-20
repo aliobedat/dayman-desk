@@ -48,6 +48,14 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
+          # WO-91: render as on a shop PC with an Arabic locale and native (national) digits, so digits.png and the
+          # windows show whether the UI keeps 0-9.
+          Set-Culture ar-SA
+          Add-Type -Namespace Nls -Name K -MemberDefinition '[DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool SetLocaleInfoW(uint lcid, uint type, string data); [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern int GetLocaleInfoW(uint lcid, uint type, System.Text.StringBuilder data, int size);'
+          [void][Nls.K]::SetLocaleInfoW(0x400, 0x1014, "2")  # LOCALE_USER_DEFAULT, LOCALE_IDIGITSUBSTITUTION = national
+          $sb = New-Object System.Text.StringBuilder 16
+          [void][Nls.K]::GetLocaleInfoW(0x400, 0x1014, $sb, 16)
+          Write-Host "user locale $((Get-Culture).Name), digit substitution $sb"
           $dir = Join-Path $pwd "desk/shots"
           $p = Start-Process desk/publish/DaymanDesk.exe -ArgumentList '--screenshots', "`"$dir`"" -PassThru
           if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "screenshots timed out" }

@@ -28,6 +28,8 @@ public sealed class AnalysisResult
     public string Reason { get; init; } = "";
     /// <summary>A coarse name of the print format (WO-89: unknown formats are reported once per format per day).</summary>
     public string Format { get; init; } = "";
+    /// <summary>Printable text bytes in the job (WO-91: an unknown job with fewer than 20 is a printer command, not a receipt).</summary>
+    public int TextChars { get; init; }
 }
 
 /// <summary>Classifies a captured print job and decodes its text with the most plausible Arabic code page.</summary>
@@ -140,6 +142,7 @@ public static class ReceiptAnalyzer
             Lines = kind == ReceiptKind.Text ? lines : Array.Empty<string>(),
             Scores = scores,
             Reason = reason,
+            TextChars = textChars,
             Format = kind == ReceiptKind.Text ? "escpos-text" : job.RasterCommands > 0 || job.TruncatedRaster > 0 ? "escpos-raster" : job.TotalBytes == 0 ? "empty" : "escpos-other",
         };
     }
