@@ -38,7 +38,7 @@ sealed class ConfirmFieldsForm : Form
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
         ShowInTaskbar = false;
-        Icon = SystemIcons.Application;
+        Icon = AppIcon.Value;
 
         var intro = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16, 12, 16, 4), BackColor = Ui.Canvas };
         intro.Controls.Add(Ui.Text("هذه أول فاتورة بعد ربط الجهاز.", Ui.Heading));

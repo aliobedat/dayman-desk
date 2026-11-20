@@ -147,7 +147,7 @@ sealed class MainForm : Form
         ClientSize = new Size(900, 700);
         MinimumSize = new Size(760, 560);
         StartPosition = FormStartPosition.CenterScreen;
-        Icon = SystemIcons.Application;
+        Icon = AppIcon.Value;
 
         var tabs = new TabControl { Dock = DockStyle.Fill, RightToLeftLayout = true, Font = Ui.Body, Padding = new Point(16, 6) };
         tabs.TabPages.Add(StatusTab());
@@ -165,7 +165,7 @@ sealed class MainForm : Form
         menu.Items.Add(_trayUpdate);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("خروج (إرجاع الطابعة)", null, (_, _) => ExitApp());
-        _tray = new NotifyIcon { Icon = SystemIcons.Application, Text = "دايماً ديسك", Visible = true, ContextMenuStrip = menu };
+        _tray = new NotifyIcon { Icon = AppIcon.Value, Text = "دايماً ديسك", Visible = true, ContextMenuStrip = menu };
         _tray.DoubleClick += (_, _) => ShowWindow();
         _tray.BalloonTipClicked += (_, _) => ShowWindow();
 

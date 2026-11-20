@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <ApplicationIcon>dayman.ico</ApplicationIcon>
     <!-- WO-89: the Windows SDK projection for Windows.Media.Ocr (built into Windows 10/11, no NuGet package). -->
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
@@ -11,7 +12,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DaymanDesk</AssemblyName>
     <RootNamespace>DaymanDesk.App</RootNamespace>
-    <Version>1.2.0</Version>
+    <Version>1.2.1</Version>
     <Product>دايماً ديسك</Product>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
