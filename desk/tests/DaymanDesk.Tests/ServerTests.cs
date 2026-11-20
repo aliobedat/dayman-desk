@@ -126,11 +126,11 @@ public static class AgentTests
         public readonly DeskAgent Agent;
         public long Seq = 1;
 
-        public Rig(bool paired = true)
+        public Rig(bool paired = true, bool confirmed = true)
         {
             var dir = Tmp.Dir();
             Cfg = new ConfigStore(Path.Combine(dir, "config.json"));
-            if (paired) Cfg.Update(c => { c.DeviceToken = "tok"; c.SamplesSent = DeskAgent.FirstSamples; });
+            if (paired) Cfg.Update(c => { c.DeviceToken = "tok"; c.SamplesSent = DeskAgent.FirstSamples; c.FieldsConfirmed = confirmed; });
             Queue = new OfflineQueue(Path.Combine(dir, "queue.json"));
             Agent = new DeskAgent(Cfg, new DeskApiClient(new HttpClient(Http), "https://t/api/desk"), Queue,
                 new RollingLog(Path.Combine(dir, "logs")), (seq, b) => { if (seq != Seq) return false; Printed.Add(b); return true; }, "0.1.0");
@@ -152,6 +152,8 @@ public static class AgentTests
         Assert.True(rec.QrPrinted, "qr printed: " + rec.Status);
         Assert.Equal(1, rig.Printed.Count, "one slip");
         Assert.True(Convert.ToHexString(rig.Printed[0]).Contains(Convert.ToHexString(System.Text.Encoding.ASCII.GetBytes(Claim))), "slip carries claim url");
+        // WO-88: and the invoice line, with what was sent to /receipt.
+        Assert.True(Convert.ToHexString(rig.Printed[0]).Contains(Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.InvoiceLine("10432", "6.670"), 864))), "slip carries invoice line");
         var body = rig.Http.Calls.First(c => c.req.RequestUri!.AbsolutePath.EndsWith("/receipt")).body;
         using var doc = JsonDocument.Parse(body);
         Assert.Equal("10432", doc.RootElement.GetProperty("invoiceNo").GetString(), "invoice");
@@ -196,6 +198,17 @@ public static class AgentTests
         Assert.Equal(0, rig.Queue.Count, "not queued");
     }
 
+    // WO-88: the owner voided this invoice's code: no QR, not queued, and said so.
+    public static async Task TestInvoiceVoidedNoQrNoQueue()
+    {
+        var rig = new Rig();
+        rig.Http.Respond = (r, _) => FakeHandler.Json(409, "{\"error\":\"INVOICE_VOIDED\",\"message\":\"x\"}");
+        var rec = await rig.Agent.ProcessJobAsync(Receipts.Cp1256(Receipts.Arabic), 5, 1);
+        Assert.Equal(0, rig.Printed.Count, "no qr");
+        Assert.Equal(0, rig.Queue.Count, "not queued");
+        Assert.Equal("ألغى صاحب المحل كودها: بلا QR", rec.Status, "status");
+    }
+
     public static async Task TestRevokedUnpairs()
     {
         var rig = new Rig();
@@ -237,7 +250,7 @@ public static class AgentTests
     {
         var rig = new Rig();
         rig.Http.Respond = ReceiptOk;
-        var job = Receipts.Ascii(new[] { "Kitchen ticket", "2x Shawarma", "1x Pepsi", "Table 4 - no onions please" });
+        var job = Receipts.Ascii(new[] { "JAMRA RESTAURANT", "Invoice No: 5521", "2x Shawarma", "1x Pepsi", "Thank you" }); // a receipt with no total
         await rig.Agent.ProcessJobAsync(job, 450, 1);
         var kinds = rig.Http.Calls.Select(c => JsonDocument.Parse(c.body).RootElement.GetProperty("kind").GetString()).ToList();
         Assert.True(kinds.Contains("slow_forward"), "slow forward reported");
@@ -284,7 +297,7 @@ public static class SetupTests
         var sh = new FakeShell();
         var store = Store();
         bool listening = false;
-        new PrinterSetup(sh, null).Install(store, "POS-80", () => listening = true);
+        new PrinterSetup(sh, null).Install(store, new[] { "POS-80" }, _ => listening = true);
         Assert.True(listening, "listener started");
         Assert.Equal("DAYMAN_9100", sh.Port, "printer on dayman port");
         Assert.True(store.Current.Active, "active");
@@ -301,7 +314,7 @@ public static class SetupTests
         sh.Override = s => s.Contains("Add-PrinterPort") ? new ShellResult(1, "", "access denied") : null;
         var store = Store();
         bool threw = false;
-        try { new PrinterSetup(sh, null).Install(store, "POS-80", () => true); }
+        try { new PrinterSetup(sh, null).Install(store, new[] { "POS-80" }, _ => true); }
         catch (SetupException ex) { threw = true; Assert.True(ex.Arabic.Contains("9100"), "arabic message"); }
         Assert.True(threw, "threw");
         Assert.Equal("USB001", sh.Port, "printer untouched");
@@ -314,7 +327,7 @@ public static class SetupTests
         var sh = new FakeShell();
         var store = Store();
         bool threw = false;
-        try { new PrinterSetup(sh, null).Install(store, "POS-80", () => false); } catch (SetupException) { threw = true; }
+        try { new PrinterSetup(sh, null).Install(store, new[] { "POS-80" }, _ => false); } catch (SetupException) { threw = true; }
         Assert.True(threw, "threw");
         Assert.Equal("USB001", sh.Port, "printer untouched");
     }
@@ -324,7 +337,7 @@ public static class SetupTests
         var sh = new FakeShell();
         var store = Store();
         var setup = new PrinterSetup(sh, null);
-        setup.Install(store, "POS-80", () => true);
+        setup.Install(store, new[] { "POS-80" }, _ => true);
         setup.Uninstall(store);
         Assert.Equal("USB001", sh.Port, "restored");
         Assert.True(!store.Current.Active, "inactive");
@@ -337,8 +350,8 @@ public static class SetupTests
         var sh = new FakeShell();
         var store = Store();
         var setup = new PrinterSetup(sh, null);
-        setup.Install(store, "POS-80", () => true);
-        setup.Install(store, "POS-80", () => true);
+        setup.Install(store, new[] { "POS-80" }, _ => true);
+        setup.Install(store, new[] { "POS-80" }, _ => true);
         Assert.Equal("USB001", store.Current.OriginalPort, "original port not overwritten by DAYMAN_9100");
     }
 
@@ -348,7 +361,7 @@ public static class SetupTests
         var store = Store();
         var setup = new PrinterSetup(sh, null);
         var log = new RollingLog(Tmp.Dir());
-        setup.Install(store, "POS-80", () => true);
+        setup.Install(store, new[] { "POS-80" }, _ => true);
         Assert.True(!Watchdog.Run(store.Current, setup, true, log), "listening: nothing to do");
         Assert.Equal("DAYMAN_9100", sh.Port, "still intercepted");
         Assert.True(Watchdog.Run(store.Current, setup, false, log), "down: restore");
@@ -361,7 +374,7 @@ public static class SetupTests
         var sh = new FakeShell();
         var store = Store();
         var setup = new PrinterSetup(sh, null);
-        setup.Install(store, "POS-80", () => true);
+        setup.Install(store, new[] { "POS-80" }, _ => true);
         sh.Override = s => s.StartsWith("(Get-Printer") ? new ShellResult(1, "", "spooler down") : null;
         bool threw = false;
         try { setup.Uninstall(store); } catch (SetupException) { threw = true; }
@@ -375,7 +388,7 @@ public static class SetupTests
         var sh = new FakeShell();
         var store = Store();
         var setup = new PrinterSetup(sh, null);
-        setup.Install(store, "POS-80", () => true);
+        setup.Install(store, new[] { "POS-80" }, _ => true);
         // Set-Printer "succeeds" but the port does not change
         sh.Override = s => s.StartsWith("Set-Printer") ? new ShellResult(0, "", "") : null;
         bool threw = false;
@@ -438,12 +451,13 @@ public static class StorageTests
     {
         var path = Path.Combine(Tmp.Dir(), "config.json");
         var store = new ConfigStore(path);
-        store.Update(c => c.PrinterName = "POS-80");
-        store.Update(c => c.OriginalPort = "USB001");
+        store.Update(c => c.Printers.Add(new PrinterRoute { PrinterName = "POS-80", OriginalPort = "USB001" }));
+        store.Update(c => c.CodePage = 864); // a second save: config.json.bak exists
         File.WriteAllText(path, "{broken");
         var again = new ConfigStore(path);
         Assert.True(again.LoadedFromBackup, "backup used");
-        Assert.Equal("POS-80", again.Current.PrinterName, "printer from backup");
+        Assert.Equal("POS-80", again.Current.Printers[0].PrinterName, "printer from backup");
+        Assert.Equal("POS-80", again.Current.PrinterName, "v1.0 mirror for an old watchdog");
     }
 
     public static void TestServerUrl()
@@ -463,9 +477,9 @@ public static class StorageTests
     public static void TestConfigRoundTrip()
     {
         var path = Path.Combine(Tmp.Dir(), "config.json");
-        new ConfigStore(path).Update(c => { c.PrinterName = "طابعة"; c.CodePage = 864; });
+        new ConfigStore(path).Update(c => { c.Printers.Add(new PrinterRoute { PrinterName = "طابعة" }); c.CodePage = 864; });
         var again = new ConfigStore(path).Current;
-        Assert.Equal("طابعة", again.PrinterName, "printer");
+        Assert.Equal("طابعة", again.Printers[0].PrinterName, "printer");
         Assert.Equal<int?>(864, again.CodePage, "code page");
         Assert.Equal(DeskApiClient.DefaultBaseUrl, again.ServerUrl, "default url");
     }

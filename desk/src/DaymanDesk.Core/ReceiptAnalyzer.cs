@@ -26,6 +26,8 @@ public sealed class AnalysisResult
     public IReadOnlyList<string> Lines { get; init; } = Array.Empty<string>();
     public IReadOnlyList<DecodingScore> Scores { get; init; } = Array.Empty<DecodingScore>();
     public string Reason { get; init; } = "";
+    /// <summary>A coarse name of the print format (WO-89: unknown formats are reported once per format per day).</summary>
+    public string Format { get; init; } = "";
 }
 
 /// <summary>Classifies a captured print job and decodes its text with the most plausible Arabic code page.</summary>
@@ -79,7 +81,7 @@ public static class ReceiptAnalyzer
         int textChars = nonEmpty.Sum(l => l.Count(b => b > 0x20));
 
         if (job.ForeignFormat)
-            return new AnalysisResult { Kind = ReceiptKind.Unknown, Reason = "foreign format (PCL/PS/PDF/XPS)" };
+            return new AnalysisResult { Kind = ReceiptKind.Unknown, Reason = "foreign format (PCL/PS/PDF/XPS)", Format = ForeignName(data) };
 
         // Join all text lines once, decode each candidate, keep the best.
         var joined = new List<byte>();
@@ -138,7 +140,17 @@ public static class ReceiptAnalyzer
             Lines = kind == ReceiptKind.Text ? lines : Array.Empty<string>(),
             Scores = scores,
             Reason = reason,
+            Format = kind == ReceiptKind.Text ? "escpos-text" : job.RasterCommands > 0 || job.TruncatedRaster > 0 ? "escpos-raster" : job.TotalBytes == 0 ? "empty" : "escpos-other",
         };
+    }
+
+    static string ForeignName(byte[] d)
+    {
+        string head = Encoding.ASCII.GetString(d, 0, Math.Min(d.Length, 12));
+        if (head.StartsWith("%PDF", StringComparison.Ordinal)) return "pdf";
+        if (head.StartsWith("%!PS", StringComparison.Ordinal)) return "postscript";
+        if (head.StartsWith("PK", StringComparison.Ordinal)) return "xps-zip";
+        return "pcl";
     }
 
     public static DecodingScore Score(int cp, string s)

@@ -2,14 +2,27 @@ using System.Text;
 
 namespace DaymanDesk.Core;
 
-/// <summary>Builds the QR slip printed after a registered receipt: native ESC/POS QR (GS ( k) + caption + cut.</summary>
+/// <summary>
+/// Builds the QR slip printed after a registered receipt: native ESC/POS QR (GS ( k) + caption + the invoice line
+/// (WO-88: with two tills on one printer the customer matches the slip to his receipt) + cut.
+/// </summary>
 public static class QrReceipt
 {
     public const string Caption = "امسح لتحصل على نقاطك";
 
+    /// <summary>«فاتورة 10432 · 12.500 د.أ»: the invoice number and the amount exactly as sent to /receipt.</summary>
+    public static string InvoiceLine(string invoiceNo, string amount) => $"فاتورة {Printable(invoiceNo)} · {Printable(amount)} د.أ";
+
+    /// <summary>The same line in ASCII, for a printer whose decoding is unknown (no Arabic).</summary>
+    public static string InvoiceLineAscii(string invoiceNo, string amount) => $"{Printable(invoiceNo)} - {Printable(amount)} JOD";
+
+    // Never a control byte from an extracted field into the printer stream.
+    static string Printable(string s) => new(s.Where(c => c >= 0x20 && c != 0x7F).ToArray());
+
     /// <param name="codePage">The shop's decoding (864, 720, 1256, 65001); null prints no Arabic caption.</param>
     /// <param name="codeTable">The ESC t value seen in the shop's own receipts, re-sent so the caption uses the same table.</param>
-    public static byte[] Build(string url, int? codePage, int? codeTable, int size = 6)
+    /// <param name="invoiceNo">The invoice number as sent to /receipt; with <paramref name="amount"/>, one line under the caption.</param>
+    public static byte[] Build(string url, int? codePage, int? codeTable, string? invoiceNo = null, string? amount = null, int size = 6)
     {
         var data = Encoding.ASCII.GetBytes(url);
         if (data.Length == 0 || data.Length > 700) throw new ArgumentException("url length", nameof(url));
@@ -30,6 +43,16 @@ public static class QrReceipt
         {
             if (codeTable != null) o.AddRange(new byte[] { 0x1B, 0x74, (byte)codeTable.Value });
             o.AddRange(ArabicPrintEncoder.Encode(Caption, codePage.Value));
+            o.Add(0x0A);
+            if (invoiceNo != null && amount != null)
+            {
+                o.AddRange(ArabicPrintEncoder.Encode(InvoiceLine(invoiceNo, amount), codePage.Value));
+                o.Add(0x0A);
+            }
+        }
+        else if (invoiceNo != null && amount != null)
+        {
+            o.AddRange(Encoding.ASCII.GetBytes(InvoiceLineAscii(invoiceNo, amount)));
             o.Add(0x0A);
         }
         o.AddRange(new byte[] { 0x1B, 0x61, 0x00 });       // left

@@ -1,5 +1,15 @@
 namespace DaymanDesk.Core;
 
+public enum RasterFormat { GsV0, EscStar, Graphics }
+
+/// <summary>
+/// One complete image command of the job (WO-89), for RasterDecoder. Offset/Length: the image bits in the job.
+/// GsV0: WidthBytes x Height rows. EscStar: Width columns of BandBytes bytes (8 or 24 dots). Graphics (GS ( L /
+/// GS 8 L function 112): Width x Height dots, rows of (Width + 7) / 8 bytes. Mode: GS v 0 m, ESC * m, or the
+/// GS ( L tone byte a.
+/// </summary>
+public sealed record RasterPiece(RasterFormat Format, int Offset, int Length, int Width, int Height, int Mode, int ScaleX, int ScaleY);
+
 /// <summary>The raw result of walking an ESC/POS byte stream: text bytes per line, with every command removed.</summary>
 public sealed class ParsedJob
 {
@@ -18,13 +28,17 @@ public sealed class ParsedJob
     public int TotalBytes { get; set; }
     /// <summary>Image commands whose declared size runs past the end of the job (noise, not a real image).</summary>
     public int TruncatedRaster { get; set; }
+    /// <summary>The complete image commands, in print order.</summary>
+    public List<RasterPiece> RasterPieces { get; } = new();
 
-    internal void Raster(long declared, long available)
+    /// <returns>True when the declared payload is complete in the job.</returns>
+    internal bool Raster(long declared, long available)
     {
-        if (declared <= 0) return;
-        if (declared > available) { TruncatedRaster++; return; }
+        if (declared <= 0) return false;
+        if (declared > available) { TruncatedRaster++; return false; }
         RasterCommands++;
         RasterBytes += (int)declared;
+        return true;
     }
 }
 
@@ -149,8 +163,11 @@ public static class EscPosParser
                 if (p + 2 >= d.Length) return d.Length;
                 int m = d[p];
                 int n = d[p + 1] | (d[p + 2] << 8);
-                int bytes = n * (m == 32 || m == 33 ? 3 : 1);
-                job.Raster(bytes, d.Length - (p + 3));
+                int k = m == 32 || m == 33 ? 3 : 1;
+                int bytes = n * k;
+                if (job.Raster(bytes, d.Length - (p + 3)))
+                    job.RasterPieces.Add(new RasterPiece(RasterFormat.EscStar, p + 3, bytes, n, 8 * k, m,
+                        m == 0 || m == 32 ? 2 : 1, k == 1 ? 3 : 1)); // single density is half width; 8-dot bands are 1/3 height
                 return Skip(d, p + 3, bytes);
             }
             case '&': // user-defined characters: y c1 c2 [x d1..d(y*x)]...
@@ -194,7 +211,9 @@ public static class EscPosParser
                 int x = d[p + 2] | (d[p + 3] << 8);
                 int y = d[p + 4] | (d[p + 5] << 8);
                 int bytes = x * y;
-                job.Raster(bytes, d.Length - (p + 6));
+                int m = d[p + 1];
+                if (job.Raster(bytes, d.Length - (p + 6)))
+                    job.RasterPieces.Add(new RasterPiece(RasterFormat.GsV0, p + 6, bytes, x, y, m, (m & 1) != 0 ? 2 : 1, (m & 2) != 0 ? 2 : 1));
                 return Skip(d, p + 6, bytes);
             }
             case '(': // GS ( fn pL pH data
@@ -202,14 +221,14 @@ public static class EscPosParser
                 if (p + 2 >= d.Length) return d.Length;
                 byte fn = d[p];
                 int len = d[p + 1] | (d[p + 2] << 8);
-                if (fn == (byte)'L') job.Raster(len, d.Length - (p + 3));
+                if (fn == (byte)'L' && job.Raster(len, d.Length - (p + 3))) Graphics(d, p + 3, len, job);
                 return Skip(d, p + 3, len);
             }
             case '8': // GS 8 L p1 p2 p3 p4 data
             {
                 if (p + 4 >= d.Length) return d.Length;
                 long len = (long)d[p + 1] + ((long)d[p + 2] << 8) + ((long)d[p + 3] << 16) + ((long)d[p + 4] << 24);
-                job.Raster(len, d.Length - (p + 5));
+                if (job.Raster(len, d.Length - (p + 5))) Graphics(d, p + 5, (int)len, job);
                 return (int)Math.Min(d.Length, p + 5 + len);
             }
             case '*': // define downloaded bit image: x y data(x*y*8)
@@ -238,6 +257,20 @@ public static class EscPosParser
                 // '!', 'B', 'H', 'f', 'h', 'w', 'a', 'b', 'r', 'I', 'T', '/', ... : one parameter
                 return Skip(d, p, 1);
         }
+    }
+
+    /// <summary>
+    /// GS ( L / GS 8 L body: m fn [fn 112: a bx by c xL xH yL yH data]. Only function 112 (store raster graphics in
+    /// the print buffer), monochrome (a = 48), is an image of the receipt; logos in NV memory (fn 67) are not.
+    /// </summary>
+    static void Graphics(ReadOnlySpan<byte> d, int start, int len, ParsedJob job)
+    {
+        if (len < 10 || d[start + 1] != 112 || d[start + 2] != 48) return;
+        int bx = d[start + 3], by = d[start + 4];
+        int x = d[start + 6] | (d[start + 7] << 8), y = d[start + 8] | (d[start + 9] << 8);
+        int bytes = (x + 7) / 8 * y;
+        if (x <= 0 || y <= 0 || bytes > len - 10) return;
+        job.RasterPieces.Add(new RasterPiece(RasterFormat.Graphics, start + 10, bytes, x, y, 48, bx == 2 ? 2 : 1, by == 2 ? 2 : 1));
     }
 
     static int Fs(ReadOnlySpan<byte> d, int i)

@@ -6,13 +6,15 @@ using System.Text.Json.Serialization;
 
 namespace DaymanDesk.Core;
 
-// Shapes of docs/desk-api.md (v1). Property names serialize camelCase.
+// Shapes of docs/desk-api.md (v1.1). Property names serialize camelCase.
 public sealed record PairRequest(string Code, string DeviceName, string AppVersion);
 public sealed record PairResponse(string Token, string ShopName, string StampMode, int CodeValidityDays, bool QrEnabled);
 public sealed record ReceiptRequest(string ClientId, string InvoiceNo, string Amount, string PrintedAt, string Kind);
 public sealed record ReceiptResponse(string Code, string ClaimUrl, string ExpiresAt, bool Already);
 public sealed record HeartbeatRequest(string AppVersion, string PrintKind, int QueueLength, long LastForwardMs);
-public sealed record HeartbeatResponse(string ServerTime, bool QrEnabled, int CodeValidityDays);
+/// <summary>v1.1: latestVersion and downloadUrl are optional (omitted when the server has no download set).</summary>
+public sealed record HeartbeatResponse(string ServerTime, bool QrEnabled, int CodeValidityDays,
+    string? LatestVersion = null, string? DownloadUrl = null);
 public sealed record ReportRequest(
     string Level, string Kind, string Message, string AppVersion,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Sample = null);

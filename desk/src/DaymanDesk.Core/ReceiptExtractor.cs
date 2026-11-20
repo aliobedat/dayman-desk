@@ -16,6 +16,22 @@ public sealed class ExtractResult
 }
 
 /// <summary>
+/// One field the owner confirmed on the first receipt: the line's label (the line without its numbers) and where
+/// the line sits. Applied first on later receipts; the heuristics only run when it does not match.
+/// </summary>
+public sealed class LearnedField
+{
+    /// <summary>ReceiptExtractor.LabelKey of the label line.</summary>
+    public string Label { get; set; } = "";
+    /// <summary>The value is on the line after the label line (the label line holds no number).</summary>
+    public bool ValueOnNextLine { get; set; }
+    /// <summary>Invoice: line index from the top. Total: line index from the bottom.</summary>
+    public int Position { get; set; }
+    /// <summary>Invoice only: which number-like token of the value line (0 = first).</summary>
+    public int TokenIndex { get; set; }
+}
+
+/// <summary>
 /// Finds the invoice number and the total on decoded receipt lines. Each line is tried as printed and
 /// reversed, because many POS programs send Arabic in visual (left-to-right) order to the printer.
 /// </summary>
@@ -62,11 +78,35 @@ public static class ReceiptExtractor
     static readonly Regex DateRx = new(@"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}$", RegexOptions.Compiled);
     static readonly Regex TimeRx = new(@"^\d{1,2}:\d{2}", RegexOptions.Compiled);
 
-    public static ExtractResult Extract(IReadOnlyList<string> rawLines)
+    /// <summary>Confidence of a field found through the owner's confirmed label.</summary>
+    public const double LearnedConfidence = 0.95;
+
+    /// <summary>
+    /// The heuristics' ceiling when the owner's confirmed label is missing on a receipt: below MinConfidence,
+    /// so a line the owner corrected is never registered again by a heuristic guess.
+    /// </summary>
+    public const double UnmatchedLearnedCap = DeskAgent.MinConfidence - 0.05;
+
+    /// <param name="ocr">
+    /// The lines come from OCR of an image receipt (WO-89): a total must have decimals (JOD prints 3; an OCR that
+    /// dropped the point would read 6.670 as 6670), and an amount right after another digit group («1 250.000»:
+    /// 1250 or 250?) is refused rather than guessed.
+    /// </param>
+    public static ExtractResult Extract(IReadOnlyList<string> rawLines, LearnedField? learnedInvoice = null, LearnedField? learnedTotal = null, bool ocr = false)
     {
         var lines = rawLines.Select(l => new Line(l)).ToList();
-        var inv = FindInvoice(lines);
-        var tot = FindTotal(lines);
+        var inv = learnedInvoice != null ? ApplyInvoice(lines, learnedInvoice) : (null, 0, null);
+        if (inv.value == null)
+        {
+            inv = FindInvoice(lines);
+            if (learnedInvoice != null) inv.conf = Math.Min(inv.conf, UnmatchedLearnedCap);
+        }
+        var tot = learnedTotal != null ? ApplyTotal(lines, learnedTotal, ocr) : (null, 0, null);
+        if (tot.value == null)
+        {
+            tot = FindTotal(lines, ocr);
+            if (learnedTotal != null) tot.conf = Math.Min(tot.conf, UnmatchedLearnedCap);
+        }
         return new ExtractResult
         {
             InvoiceNo = inv.value,
@@ -78,14 +118,134 @@ public static class ReceiptExtractor
         };
     }
 
+    /// <summary>
+    /// A line reduced to its label: normalized, without digits, number punctuation or extra spaces. Two
+    /// receipts of the same POS give the same key for the same label whatever the numbers on it. A printed
+    /// time and its AM/PM (ص/م) are dropped too, so a label learned in the morning still matches at night.
+    /// </summary>
+    public static string LabelKey(string raw)
+    {
+        // Times and their AM/PM first, then whole Latin value tokens ("INV-2291", "A12"), so a letter
+        // prefix of a number is not label.
+        var n = AmPmRx.Replace(ClockRx.Replace(TextNormalizer.Normalize(raw), " "), " ");
+        n = ValueTokenRx.Replace(n, " ");
+        var sb = new System.Text.StringBuilder(n.Length);
+        foreach (char c in n)
+        {
+            if (char.IsDigit(c) || LabelPunctuation.IndexOf(c) >= 0) sb.Append(' ');
+            else sb.Append(c);
+        }
+        return string.Join(' ', sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    }
+
+    const string LabelPunctuation = ".,:;#/\\-_*=|()[]%+";
+
+    static readonly Regex ClockRx = new(@"\d{1,2}:\d{2}(?::\d{2})?", RegexOptions.Compiled);
+    static readonly Regex AmPmRx = new(@"(?<![\p{L}])(?:a\.?m\.?|p\.?m\.?|ص|م)(?![\p{L}])", RegexOptions.Compiled);
+
+    static readonly Regex ValueTokenRx = new(@"[a-z0-9\-/_.,#]*[0-9][a-z0-9\-/_.,#]*", RegexOptions.Compiled);
+
+    /// <summary>A usable label: at least two letters, and more than a currency name («2.000 JOD» has no label).</summary>
+    static bool HasLetters(string key) =>
+        key.Count(char.IsLetter) >= 2 && !key.Split(' ').All(w => CurrencyWords.Contains(w) || w == "د" || w == "ا");
+
+    /// <summary>The invoice-number candidates on a line, in line order.</summary>
+    public static IReadOnlyList<string> InvoiceTokens(string raw)
+    {
+        var l = new Line(raw);
+        return TokensWithDecimals(l.Cased, 0, l.Cased.Length);
+    }
+
+    /// <summary>The amount a line would give as the total (the largest amount on it), or null.</summary>
+    public static decimal? AmountOf(string raw) => PickAmount(new Line(raw).Fwd).amount;
+
+    /// <summary>
+    /// Learns the invoice field from the line the owner chose. A line without letters (only the number) takes
+    /// its label from the line above. Returns null when the chosen line holds no invoice-like token.
+    /// </summary>
+    public static (LearnedField field, string value)? LearnInvoice(IReadOnlyList<string> lines, int index, string? preferredValue = null)
+    {
+        if (index < 0 || index >= lines.Count) return null;
+        var tokens = InvoiceTokens(lines[index]);
+        if (tokens.Count == 0) return null;
+        int ti = 0;
+        if (preferredValue != null) { int k = tokens.ToList().IndexOf(preferredValue); if (k >= 0) ti = k; }
+        var (label, next, labelIndex) = LabelFor(lines, index);
+        if (label == null) return null;
+        return (new LearnedField { Label = label, ValueOnNextLine = next, Position = labelIndex, TokenIndex = ti }, tokens[ti]);
+    }
+
+    /// <summary>Learns the total field from the line the owner chose; null when it holds no amount.</summary>
+    public static (LearnedField field, decimal value)? LearnTotal(IReadOnlyList<string> lines, int index)
+    {
+        if (index < 0 || index >= lines.Count) return null;
+        var amount = AmountOf(lines[index]);
+        if (amount == null) return null;
+        var (label, next, labelIndex) = LabelFor(lines, index);
+        if (label == null) return null;
+        return (new LearnedField { Label = label, ValueOnNextLine = next, Position = lines.Count - 1 - labelIndex }, amount.Value);
+    }
+
+    static (string? label, bool next, int labelIndex) LabelFor(IReadOnlyList<string> lines, int index)
+    {
+        var key = LabelKey(lines[index]);
+        if (HasLetters(key)) return (key, false, index);
+        if (index > 0)
+        {
+            var above = LabelKey(lines[index - 1]);
+            if (HasLetters(above)) return (above, true, index - 1);
+        }
+        return (null, false, index);
+    }
+
+    /// <summary>The lines whose label is the learned one, closest to the learned position first.</summary>
+    static IEnumerable<int> Matches(List<Line> lines, LearnedField f, bool fromBottom)
+    {
+        var hits = new List<int>();
+        // LabelKey again: a label saved before a LabelKey change (e.g. with "pm" in it) still matches.
+        var label = LabelKey(f.Label);
+        for (int i = 0; i < lines.Count; i++) if (lines[i].Key == label) hits.Add(i);
+        return hits.OrderBy(i => Math.Abs((fromBottom ? lines.Count - 1 - i : i) - f.Position));
+    }
+
+    static (string? value, double conf, string? line) ApplyInvoice(List<Line> lines, LearnedField f)
+    {
+        if (string.IsNullOrEmpty(f.Label)) return (null, 0, null);
+        foreach (int i in Matches(lines, f, fromBottom: false))
+        {
+            int vi = f.ValueOnNextLine ? i + 1 : i;
+            if (vi >= lines.Count) continue;
+            var tokens = TokensWithDecimals(lines[vi].Cased, 0, lines[vi].Cased.Length);
+            if (tokens.Count == 0) continue;
+            var v = f.TokenIndex < tokens.Count ? tokens[f.TokenIndex] : tokens[^1];
+            return (v, LearnedConfidence, lines[i].Raw);
+        }
+        return (null, 0, null);
+    }
+
+    static (decimal? value, double conf, string? line) ApplyTotal(List<Line> lines, LearnedField f, bool ocr)
+    {
+        if (string.IsNullOrEmpty(f.Label)) return (null, 0, null);
+        foreach (int i in Matches(lines, f, fromBottom: true))
+        {
+            int vi = f.ValueOnNextLine ? i + 1 : i;
+            if (vi >= lines.Count) continue;
+            var (amount, _) = PickAmount(lines[vi].Fwd, ocr);
+            if (amount != null) return (amount, LearnedConfidence, lines[i].Raw);
+        }
+        return (null, 0, null);
+    }
+
     sealed class Line
     {
         public readonly string Raw, Fwd, Rev;
         /// <summary>Fwd with the original letter case, for values (same length as Fwd).</summary>
         public readonly string Cased;
+        public readonly string Key;
         public Line(string raw)
         {
             Raw = raw;
+            Key = LabelKey(raw);
             Fwd = TextNormalizer.Normalize(raw);
             Cased = TextNormalizer.Normalize(raw, lower: false);
             if (Cased.Length != Fwd.Length) Cased = Fwd;
@@ -178,7 +338,7 @@ public static class ReceiptExtractor
         return list;
     }
 
-    static (decimal? value, double conf, string? line) FindTotal(List<Line> lines)
+    static (decimal? value, double conf, string? line) FindTotal(List<Line> lines, bool ocr)
     {
         decimal? best = null;
         double bestConf = 0;
@@ -198,10 +358,10 @@ public static class ReceiptExtractor
             }
             if (w == 0) continue;
 
-            var (amount, hasDecimals) = PickAmount(line.Fwd);
+            var (amount, hasDecimals) = PickAmount(line.Fwd, ocr);
             if (amount == null && li + 1 < lines.Count)
             {
-                (amount, hasDecimals) = PickAmount(lines[li + 1].Fwd);
+                (amount, hasDecimals) = PickAmount(lines[li + 1].Fwd, ocr);
                 w *= 0.85;
             }
             if (amount == null) continue;
@@ -222,17 +382,21 @@ public static class ReceiptExtractor
         foreach (var line in lines.AsEnumerable().Reverse())
         {
             if (!ContainsAny(line.Fwd + " " + line.Rev, CurrencyWords)) continue;
-            var (amount, _) = PickAmount(line.Fwd);
+            var (amount, _) = PickAmount(line.Fwd, ocr);
             if (amount != null && (best == null || amount > best)) { best = amount; bestLine = line.Raw; }
         }
         return best != null ? (best, 0.4, bestLine) : (null, 0, null);
     }
 
-    static (decimal? amount, bool hasDecimals) PickAmount(string s)
+    static readonly Regex DigitGroupBefore = new(@"\d\s+$", RegexOptions.Compiled);
+
+    static (decimal? amount, bool hasDecimals) PickAmount(string s, bool ocr = false)
     {
         decimal? bestDec = null, bestInt = null;
         foreach (Match m in NumberRx.Matches(s))
         {
+            // OCR: «1 250.000» may be 1250 or a quantity and 250: on doubt the line gives no amount.
+            if (ocr && DigitGroupBefore.IsMatch(s[..m.Index])) return (null, false);
             // Skip dates and times: a number glued to '/', ':' or '-' with another number.
             int end = m.Index + m.Length;
             if (end < s.Length && (s[end] == '/' || s[end] == ':') ) continue;
@@ -243,7 +407,32 @@ public static class ReceiptExtractor
             else { if (bestInt == null || val > bestInt) bestInt = val; }
         }
         if (bestDec != null) return (bestDec, true);
-        return (bestInt, false);
+        return ocr ? (null, false) : (bestInt, false);
+    }
+
+    // Order tickets for the kitchen or the bar printed on the receipt printer (normalized forms).
+    static readonly Label[] KitchenMarkers =
+    {
+        new("مطبخ", 1, true), new("تحضير", 1, true), new("طلب تحضير", 1, false), new("kitchen", 1, false),
+        new("kot", 1, false), new("order ticket", 1, false),
+    };
+
+    public static bool HasKitchenMarker(IReadOnlyList<string> rawLines) =>
+        rawLines.Select(l => new Line(l)).Any(l => KitchenMarkers.Any(k => Find(l.Fwd, k).idx >= 0 || Find(l.Rev, k).idx >= 0));
+
+    /// <summary>
+    /// WO-89: a print that is not a receipt (a kitchen or order ticket on the same printer), forwarded and nothing
+    /// else: no QR, no report, not a failure. Only without a confidently read total, and only with a kitchen marker
+    /// or with no decimal amount at all. A print with prices, or with a confidently read invoice number, is a receipt
+    /// (if it is not read, a reading failure, reported).
+    /// </summary>
+    public static bool IsNonReceipt(IReadOnlyList<string> lines, ExtractResult? e)
+    {
+        if (e == null) return true;
+        if (e.Total != null && e.TotalConfidence >= DeskAgent.MinConfidence) return false;
+        if (HasKitchenMarker(lines)) return true;
+        if (e.InvoiceNo != null && e.InvoiceConfidence >= DeskAgent.MinConfidence) return false;
+        return !lines.Any(l => PickAmount(TextNormalizer.Normalize(l)).hasDecimals);
     }
 
     /// <summary>

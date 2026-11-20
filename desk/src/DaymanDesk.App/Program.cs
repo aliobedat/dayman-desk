@@ -16,7 +16,7 @@ static class Program
         if (!first)
         {
             if (!args.Contains("--tray"))
-                MessageBox.Show("دايماً ديسك يعمل الآن. افتحه من الأيقونة بجانب الساعة.", "دايماً ديسك",
+                MessageBox.Show("دايماً ديسك يعمل الآن. افتحه من الأيقونة بجانب الساعة.\n\nلتثبيت إصدار جديد: اختر «خروج (إرجاع الطابعة)» من الأيقونة، ثم شغّل هذا الملف مرة أخرى.", "دايماً ديسك",
                     MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1,
                     MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
             return 0;
@@ -24,6 +24,9 @@ static class Program
 
         ApplicationConfiguration.Initialize();
         using var rt = new Runtime();
+        // CI only: renders every tab and the «تأكيد الحقول» dialog to PNG files (no printer, no network, no Start).
+        int shots = Array.IndexOf(args, "--screenshots");
+        if (shots >= 0 && shots + 1 < args.Length) return Screenshots.Run(rt, args[shots + 1]);
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             rt.Log.Error("CRASH " + e.ExceptionObject);
@@ -49,15 +52,24 @@ static class Program
         {
             var cfgPath = Path.Combine(Runtime.DataDir, "config.json");
             if (!File.Exists(cfgPath) && !File.Exists(cfgPath + ".bak")) return 0;
+            // No token protector and no Update: the watchdog never writes config.json, so it never writes the token.
             var store = new ConfigStore(cfgPath); // falls back to config.json.bak
             var cfg = store.Current;
-            if (string.IsNullOrEmpty(cfg.PrinterName)) return 0;
-            bool listening = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
-                .Any(e => e.Port == DeskConfig.ListenPort && (IPAddress.IsLoopback(e.Address) || e.Address.Equals(IPAddress.Any)));
-            if (listening) return 0;
+            if (cfg.Printers.Count == 0 && !cfg.Network.Enabled) return 0;
+            var listeners = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners();
+            bool Listening(int port) => listeners.Any(e => e.Port == port && (IPAddress.IsLoopback(e.Address) || e.Address.Equals(IPAddress.Any)));
+            bool networkDown = Watchdog.NetworkDown(cfg, Listening);
+            if (cfg.Printers.All(r => Listening(r.ListenPort)) && !networkDown) return 0;
             var log = new RollingLog(Path.Combine(Runtime.DataDir, "logs"));
             if (store.LoadedFromBackup) log.Warn("watchdog: config.json unreadable, using config.json.bak");
-            try { Watchdog.Run(cfg, new PrinterSetup(new PowerShellShell(log), log), listening, log); }
+            var shell = new PowerShellShell(log);
+            if (networkDown)
+            {
+                // Network mode has no Windows port to restore (the address is set on the tablet): start the program again.
+                log.Warn($"watchdog: nothing listens on network-mode port {cfg.Network.ListenPort}, starting the tray task");
+                shell.Run(ScheduledTasks.StartTrayScript());
+            }
+            try { Watchdog.Run(cfg, new PrinterSetup(shell, log), Listening, log); }
             catch (Exception ex) { log.Error("watchdog: restore not confirmed: " + ex.Message); return 1; }
             return 0;
         }

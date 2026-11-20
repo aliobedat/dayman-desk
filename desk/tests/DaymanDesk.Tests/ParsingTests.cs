@@ -214,6 +214,37 @@ public static class QrTests
         }
     }
 
+    // WO-88: the invoice line under the caption, readable in every code page the program prints in.
+    public static void TestQrInvoiceLine()
+    {
+        const string url = "https://daymanjo.com/c/abc/s/K7Q2M9XP";
+        string line = QrReceipt.InvoiceLine("10432", "12.500");
+        Assert.Equal("فاتورة 10432 · 12.500 د.أ", line, "line text");
+        foreach (int cp in new[] { 864, 720, 1256, 65001 })
+        {
+            var slip = QrReceipt.Build(url, cp, 22, "10432", "12.500");
+            var lineBytes = ArabicPrintEncoder.Encode(line, cp);
+            Assert.True(!lineBytes.Contains((byte)'?'), "unencodable glyph in " + cp);
+            var captionBytes = ArabicPrintEncoder.Encode(QrReceipt.Caption, cp);
+            var expected = Convert.ToHexString(captionBytes.Concat(new byte[] { 0x0A }).Concat(lineBytes).Concat(new byte[] { 0x0A }).ToArray());
+            Assert.True(Convert.ToHexString(slip).Contains(expected), "line right under the caption in " + cp);
+            // Printed in visual order: the digits stay readable left to right, the Arabic reads back as written.
+            var back = cp == 65001 ? System.Text.Encoding.UTF8.GetString(lineBytes) : ReceiptAnalyzer.GetDecoder(cp).GetString(lineBytes);
+            Assert.True(back.Contains("10432") && back.Contains("12.500"), "digits readable in " + cp + ": " + back);
+            if (cp == 65001) { Assert.Equal(line, back, "utf-8 line"); continue; }
+            var arabic = TextNormalizer.Normalize(TextNormalizer.Reverse(back)).Replace("23401", "10432").Replace("005.21", "12.500");
+            Assert.Equal(TextNormalizer.Normalize(line), arabic, "line " + cp);
+        }
+        // No known decoding: no Arabic, the same facts in ASCII.
+        var plain = System.Text.Encoding.ASCII.GetString(QrReceipt.Build(url, null, null, "10432", "12.500"));
+        Assert.True(plain.Contains("10432 - 12.500 JOD\n"), "ascii line");
+        // A control character from the extractor never reaches the printer.
+        var esc = System.Text.Encoding.ASCII.GetString(QrReceipt.Build(url, null, null, "10\u001B432", "1.000"));
+        Assert.True(esc.Contains("10432 - 1.000 JOD\n"), "no ESC from the invoice");
+        // Without an invoice the slip is as before.
+        Assert.Equal(Convert.ToHexString(QrReceipt.Build(url, 864, 22)), Convert.ToHexString(QrReceipt.Build(url, 864, 22, null, null)), "unchanged without invoice");
+    }
+
     public static void TestQrRejectsBadUrl()
     {
         bool threw = false;

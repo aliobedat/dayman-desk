@@ -60,3 +60,9 @@ static class RawPrinter
         finally { ClosePrinter(h); }
     }
 }
+
+/// <summary>The forwarder's raw queue (Core IRawQueue) on winspool.</summary>
+sealed class WinspoolQueue : DaymanDesk.Core.IRawQueue
+{
+    public void Write(string queue, byte[] data, string docName) => RawPrinter.Write(queue, data, docName);
+}

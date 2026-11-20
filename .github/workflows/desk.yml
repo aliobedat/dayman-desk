@@ -29,10 +29,50 @@ jobs:
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -o desk/publish
 
+      - name: Version and SHA256
+        id: meta
+        shell: pwsh
+        run: |
+          $exe = "desk/publish/DaymanDesk.exe"
+          $v = (Get-Item $exe).VersionInfo.ProductVersion -replace '\+.*$', ''
+          $want = ([xml](Get-Content desk/src/DaymanDesk.App/DaymanDesk.App.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          if ($v -ne $want) { throw "exe version $v does not match csproj $want" }
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$h  DaymanDesk.exe" | Out-File -Encoding ascii -NoNewline desk/publish/DaymanDesk.exe.sha256
+          Copy-Item desk/REPORT.md desk/publish/REPORT.md
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "sha=$h" >> $env:GITHUB_OUTPUT
+          Write-Host "DaymanDesk $v  sha256 $h"
+
+      - name: Screenshots of the Arabic UI (review only)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $dir = Join-Path $pwd "desk/shots"
+          $p = Start-Process desk/publish/DaymanDesk.exe -ArgumentList '--screenshots', "`"$dir`"" -PassThru
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "screenshots timed out" }
+          Get-ChildItem $dir | Format-Table Name, Length
+          if (Test-Path "$dir/error.txt") { Get-Content "$dir/error.txt"; throw "screenshots failed" }
+          # Also in the log (base64, 3000-char lines) for reviewers who cannot download artifacts.
+          foreach ($f in Get-ChildItem "$dir/*.png") {
+            $b = [Convert]::ToBase64String([IO.File]::ReadAllBytes($f.FullName))
+            for ($i = 0; $i -lt $b.Length; $i += 3000) { Write-Host ("SHOT {0} {1}" -f $f.Name, $b.Substring($i, [Math]::Min(3000, $b.Length - $i))) }
+          }
+
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: DaymanDesk-screenshots
+          path: desk/shots
+          if-no-files-found: warn
+
       - uses: actions/upload-artifact@v4
         with:
           name: DaymanDesk
-          path: desk/publish/DaymanDesk.exe
+          path: |
+            desk/publish/DaymanDesk.exe
+            desk/publish/DaymanDesk.exe.sha256
+            desk/publish/REPORT.md
           if-no-files-found: error
 
       - name: Latest build (desk-latest prerelease, every green master build)
@@ -42,9 +82,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete desk-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-          gh release create desk-latest desk/publish/DaymanDesk.exe --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" --prerelease --title "دايماً ديسك (آخر نسخة)" \
-            --notes "آخر بناء ناجح من master (${GITHUB_SHA::7}). التثبيت والاختبار: desk/REPORT.md"
+          gh release create desk-latest desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "دايماً ديسك ${{ steps.meta.outputs.version }} (آخر نسخة)" \
+            --notes "الإصدار ${{ steps.meta.outputs.version }}، آخر بناء ناجح من master (${GITHUB_SHA::7}). SHA256: ${{ steps.meta.outputs.sha }}. التثبيت والاختبار: REPORT.md"
 
       - name: Prerelease
         if: startsWith(github.ref, 'refs/tags/desk-v')
@@ -52,6 +93,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: >
-          gh release create "$GITHUB_REF_NAME" desk/publish/DaymanDesk.exe
+          gh release create "$GITHUB_REF_NAME" desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md
           --repo "$GITHUB_REPOSITORY" --prerelease --title "دايماً ديسك $GITHUB_REF_NAME"
           --notes "نسخة تجريبية من دايماً ديسك. التثبيت والاختبار: desk/REPORT.md"

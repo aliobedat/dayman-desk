@@ -27,6 +27,10 @@ public static class ScheduledTasks
         $"$p = New-ScheduledTaskPrincipal -UserId {PrinterSetup.Q(user)} -LogonType Interactive -RunLevel Highest\n" +
         $"Register-ScheduledTask -TaskName {PrinterSetup.Q(Tray)} -TaskPath {PrinterSetup.Q(Folder)} -Action $a -Trigger $t -Principal $p -Settings $s -Force | Out-Null";
 
+    /// <summary>The watchdog (SYSTEM) starts the logged-on user's tray task when «وضع الشبكة» has no listener.</summary>
+    public static string StartTrayScript() =>
+        $"Start-ScheduledTask -TaskPath {PrinterSetup.Q(Folder)} -TaskName {PrinterSetup.Q(Tray)}";
+
     public static string RemoveScript() =>
         $"Get-ScheduledTask -TaskPath {PrinterSetup.Q(Folder)} -ErrorAction SilentlyContinue | Unregister-ScheduledTask -Confirm:$false";
 

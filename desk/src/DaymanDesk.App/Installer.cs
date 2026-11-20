@@ -9,6 +9,9 @@ static class Installer
     public static string InstallDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "DaymanDesk");
     public static string InstalledExe => Path.Combine(InstallDir, "DaymanDesk.exe");
 
+    public static bool RunningInstalled =>
+        Environment.ProcessPath is { } p && string.Equals(Path.GetFullPath(p), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// The SYSTEM task always points at Program Files, never at the download folder (a user could replace a
     /// file there and have it run as SYSTEM). If the copy fails, the install fails.
