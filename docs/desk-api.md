@@ -1,7 +1,7 @@
-# Dayman Desk API contract (v1.3 WO-94, Ali 25 Nov 2026; v1.2 WO-90 and v1.1, Ali 20 Nov 2026; v1 19 Nov 2026)
+# Dayman Desk API contract (v1.4 WO-97, Ali 26 Nov 2026; v1.3 WO-94, Ali 25 Nov 2026; v1.2 WO-90 and v1.1, Ali 20 Nov 2026; v1 19 Nov 2026)
 
 Both the server (WO-84, WO-86 items 8-12) and the Windows program (WO-85, WO-86 items 1-7) implement exactly this.
-This file is the single source; v1.1 changes are marked **v1.1**, v1.2 changes **v1.2**, v1.3 changes **v1.3**. All are backward compatible
+This file is the single source; v1.1 changes are marked **v1.1**, v1.2 changes **v1.2**, v1.3 changes **v1.3**, v1.4 changes **v1.4**. All are backward compatible
 (an older program ignores them and keeps working unchanged; a newer program works with an older server). Base URL: `https://daymanjo.com/api/desk`
 (configurable in the program). JSON, UTF-8. Every error body: `{ "error": "<CODE>", "message": "<Arabic text>" }`.
 Every call except `pair` sends `Authorization: Bearer <deviceToken>`; a missing, wrong or revoked token → 401
@@ -75,9 +75,28 @@ Amman day never gets a code again). No QR, not queued, no report: the receipt is
 409 `CODE_REFUSED` (**v1.2**: `code` is not an unbound, unvoided, unexpired pool code of this device; nothing is registered).
 422 `OUT_OF_RANGE` (amount), 400 `BAD_INPUT`.
 
+## POST /fields (**v1.4**, WO-97)
+Request `{ "sampleId": "<uuid>", "lines": ["...", ...], "invoiceLine": 3, "totalLine": 9, "problem": "<Arabic, optional>" }`
+204. The first receipt after pairing (or after «إعادة تأكيد الحقول»), for the owner to confirm on his dashboard
+(settings → دايماً ديسك, «أول فاتورة بانتظار تأكيدك»). `lines`: the decoded lines (text or OCR), the first 60, each
+≤ 80 characters, Latin digits, Jordanian mobile numbers (07[789] / 7[789] / (+|00)?9627[789] + 7 digits, spaces or dashes
+allowed, never inside a longer digit run) replaced by «[رقم مخفي]» on the device (long invoice numbers stay visible);
+the server scrubs again and stores them on the device row (never readable by the admin panel), cleared at confirmation
+and after 7 days. `invoiceLine` / `totalLine`: the detected lines, -1 when none. A new sample replaces the old one.
+`problem`: why the owner's last choice was refused (`ConfirmFields`' Arabic reason), shown to him above the lines.
+20 calls per device per hour. 400 `BAD_INPUT` (an index outside `lines`).
+
 ## POST /heartbeat (every 5 minutes)
-Request `{ "appVersion": "1.0.0", "printKind": "text"|"image"|"unknown", "queueLength": 0, "lastForwardMs": 42 }`
-200 `{ "serverTime": "<ISO>", "qrEnabled": true, "codeValidityDays": 2, "latestVersion": "1.0.0", "downloadUrl": "https://..." }`
+Request `{ "appVersion": "1.0.0", "printKind": "text"|"image"|"unknown", "queueLength": 0, "lastForwardMs": 42, "lastProblem": "offline", "lastProblemText": "<Arabic>", "fieldsApplied": "<uuid>" }`
+200 `{ "serverTime": "<ISO>", "qrEnabled": true, "codeValidityDays": 2, "latestVersion": "1.0.0", "downloadUrl": "https://...", "fieldsConfirmed": { "sampleId": "<uuid>", "invoiceLine": 3, "totalLine": 9 } }`
+- **v1.4** `lastProblem` (code, `[a-z_]{1,40}`) and `lastProblemText` (its Arabic text, ≤ 400, scrubbed like `/fields`):
+  the program's current problem, null when none, omitted = unchanged. Shown on the owner's device card and in /admin.
+- **v1.4** `fieldsConfirmed`: the owner confirmed the sample `sampleId` on his dashboard. It is answered on every
+  heartbeat until one carries `fieldsApplied` = that id (the program sends the id it last handled, applied or refused;
+  a lost answer never drops the choice). The program applies a given id once, and only to the receipt it sent with that id, through the same `ConfirmFields` as the local window, and reports it
+  (`report`, kind `other`). A refused choice re-sends the sample under a fresh `sampleId` with `problem`.
+  An installer's confirmation in the program's own window sends that sample's id as `fieldsApplied` too, which also
+  clears the pending sample on the dashboard.
 - **v1.1** `latestVersion` (optional, env `DESK_LATEST_VERSION`): the newest released program version, semantic
   `MAJOR.MINOR.PATCH`. `downloadUrl` (optional, env `DESK_DOWNLOAD_URL`): an absolute https link to that version's
   `DaymanDesk.exe`. Each is omitted when its env is empty; the program shows an update only when both are present. The link must open without a login on a shop PC (the
@@ -116,6 +135,7 @@ receipts (confirmation, both fields ≥ 0.75); an image it cannot read gets no `
   any error → the receipt prints without a QR, the receipt is queued and sent later (no QR then), and a `report` is sent.
 - `qrEnabled: false` (owner switched it off) → no QR, receipts still sent.
 - **v1.1** `/receipt` is called only after the owner confirmed the two fields on the first text receipt after pairing
-  («تأكيد الحقول»), and only when both the invoice number and the total reach confidence ≥ 0.75. The confirmation
+  («تأكيد الحقول»; **v1.4** on his dashboard through `/fields`, the window no longer opens by itself on the cashier's
+  PC and stays on a button for an installer; status «بانتظار تأكيد صاحب المحل من لوحة التحكم»), and only when both the invoice number and the total reach confidence ≥ 0.75. The confirmation
   receipt itself is not registered.
 - **v1.1** the device token is stored sealed with Windows DPAPI (LocalMachine scope), never in plain text.

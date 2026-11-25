@@ -6,7 +6,7 @@ using System.Text.Json.Serialization;
 
 namespace DaymanDesk.Core;
 
-// Shapes of docs/desk-api.md (v1.2). Property names serialize camelCase.
+// Shapes of docs/desk-api.md (v1.4). Property names serialize camelCase.
 // v1.3 (WO-95): pairing sends the signing key and answers the device number.
 public sealed record PairRequest(string Code, string DeviceName, string AppVersion,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PublicKey = null);
@@ -23,10 +23,19 @@ public sealed record ReceiptResponse(string Code, string ClaimUrl, string Expire
 /// <summary>v1.2 (WO-90): a refill of the device's pool of pre-issued codes.</summary>
 public sealed record CodesRequest(int Count);
 public sealed record CodesResponse(List<string>? Codes, string? ClaimBase);
-public sealed record HeartbeatRequest(string AppVersion, string PrintKind, int QueueLength, long LastForwardMs);
-/// <summary>v1.1: latestVersion and downloadUrl are optional (omitted when the server has no download set).</summary>
+/// <summary>v1.4 (WO-97): the current problem's code and Arabic text (scrubbed), null when none.</summary>
+/// v1.4: fieldsApplied = the sample id whose owner choice was applied or refused (the server stops answering it).
+public sealed record HeartbeatRequest(string AppVersion, string PrintKind, int QueueLength, long LastForwardMs,
+    string? LastProblem = null, string? LastProblemText = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? FieldsApplied = null);
+/// <summary>v1.1: latestVersion and downloadUrl are optional (omitted when the server has no download set).
+/// v1.4: fieldsConfirmed, once, after the owner confirmed the first receipt's lines on his dashboard.</summary>
 public sealed record HeartbeatResponse(string ServerTime, bool QrEnabled, int CodeValidityDays,
-    string? LatestVersion = null, string? DownloadUrl = null);
+    string? LatestVersion = null, string? DownloadUrl = null, FieldsChoice? FieldsConfirmed = null);
+/// <summary>v1.4 (WO-97): the first receipt's lines (scrubbed, at most 60 x 80) for the owner's dashboard.</summary>
+public sealed record FieldsRequest(string SampleId, List<string> Lines, int InvoiceLine, int TotalLine,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Problem = null);
+public sealed record FieldsChoice(string SampleId, int InvoiceLine, int TotalLine);
 public sealed record ReportRequest(
     string Level, string Kind, string Message, string AppVersion,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Sample = null);
@@ -78,6 +87,9 @@ public sealed class DeskApiClient
 
     public Task<ApiResult<KeyResponse>> KeyAsync(string token, KeyRequest req, CancellationToken ct = default) =>
         PostAsync<KeyResponse>("/key", req, token, ct);
+
+    public Task<ApiResult<object>> FieldsAsync(string token, FieldsRequest req, CancellationToken ct = default) =>
+        PostAsync<object>("/fields", req, token, ct);
 
     public Task<ApiResult<object>> ReportAsync(string token, ReportRequest req, CancellationToken ct = default) =>
         PostAsync<object>("/report", req, token, ct);

@@ -254,12 +254,8 @@ sealed class MainForm : Form
 
         _rt.ReceiptProcessed += r => BeginInvokeSafe(() => AddReceipt(r));
         _rt.StateChanged += () => BeginInvokeSafe(RefreshState);
-        _rt.ConfirmationNeeded += p => BeginInvokeSafe(() =>
-        {
-            _tray.ShowBalloonTip(5000, "دايماً ديسك", "أكّد سطر رقم الفاتورة وسطر المجموع ليبدأ تسجيل الفواتير.", ToolTipIcon.Info);
-            ShowWindow();
-            OpenConfirm(_rt.Agent.PendingConfirmation ?? p);
-        });
+        // WO-97: the owner confirms on his dashboard; the window no longer opens on the cashier's PC by itself.
+        _rt.ConfirmationNeeded += _ => BeginInvokeSafe(RefreshState);
         _rt.ReconfirmNeeded += () => BeginInvokeSafe(() =>
             _tray.ShowBalloonTip(5000, "دايماً ديسك", "تغيّرت لغة قراءة فواتير الصورة: أكّد الحقول مرة أخرى في الفاتورة التالية.", ToolTipIcon.Warning));
         _rt.UpdateAvailable += (v, _) => BeginInvokeSafe(() =>
@@ -315,7 +311,7 @@ sealed class MainForm : Form
         var confirmBtn = Ui.Primary("تأكيد الحقول");
         confirmBtn.Dock = DockStyle.Left;
         confirmBtn.Click += (_, _) => { if (_rt.Agent.PendingConfirmation is { } p) OpenConfirm(p); };
-        var confirmText = Ui.Text("لا تُسجَّل الفواتير حتى تؤكد سطر رقم الفاتورة وسطر المجموع في أول فاتورة.", Ui.Strong, Ui.Warning);
+        var confirmText = Ui.Text(DeskAgent.AwaitingOwner + " (الإعدادات ← دايماً ديسك). يمكن للمثبّت التأكيد هنا.", Ui.Strong, Ui.Warning);
         confirmText.Dock = DockStyle.Fill;
         confirmText.AutoSize = false;
         confirmText.TextAlign = ContentAlignment.MiddleRight;
@@ -561,7 +557,7 @@ sealed class MainForm : Form
         else if (on && c.Paired && c.FieldsConfirmed && c.LastPrintKind == "image" && c.LastProblem == Problems.OcrUnavailable)
             SetHeadline("يعمل، لكن قراءة فواتير الصورة غير مثبّتة: بلا QR. انظر «آخر مشكلة».", Ui.Warning);
         else if (on && c.Paired && c.FieldsConfirmed) SetHeadline("يعمل: كل فاتورة تمر عبر دايماً ديسك ويُطبع لها QR.", Ui.Success);
-        else if (on && c.Paired) SetHeadline("يعمل: بانتظار «تأكيد الحقول» في أول فاتورة.", Ui.Warning);
+        else if (on && c.Paired) SetHeadline("يعمل: " + DeskAgent.AwaitingOwner + ".", Ui.Warning);
         else if (on) SetHeadline("يعمل بلا ربط: تُطبع الفواتير كالمعتاد بلا QR. اربط الجهاز من تبويب «الربط».", Ui.Warning);
         else SetHeadline("متوقف: الطابعة تطبع مباشرة بلا دايماً ديسك.", Ui.Muted);
 
@@ -593,7 +589,7 @@ sealed class MainForm : Form
             _ => "لم تُطبع فاتورة بعد",
         };
         _info["QR بعد الفاتورة"].Text = !c.Paired ? "بعد ربط الجهاز" : !c.QrEnabled ? "أوقفه صاحب المحل من لوحة التحكم"
-            : !c.FieldsConfirmed ? "بعد «تأكيد الحقول» في أول فاتورة" : "يعمل";
+            : !c.FieldsConfirmed ? "بعد تأكيد صاحب المحل للحقول من لوحة التحكم" : "يعمل";
         int q = _rt.Queue.Count;
         _info["بانتظار الإرسال"].Text = q == 0 ? "لا شيء" : q.ToString(CultureInfo.InvariantCulture) + " (تُرسل عند عودة الاتصال)";
         _info["الإصدار"].Text = Runtime.Version + (c.UpdateVersion != null ? $"  (يوجد تحديث: {c.UpdateVersion})"
@@ -623,7 +619,7 @@ sealed class MainForm : Form
         if (!_url.Focused) _url.Text = c.ServerUrl;
         _fieldsStatus.Text = !c.Paired ? "يُطلب التأكيد في أول فاتورة بعد الربط."
             : c.FieldsConfirmed ? "أكّد صاحب المحل سطر رقم الفاتورة وسطر المجموع. إن تغيّر شكل الفاتورة فاضغط «إعادة تأكيد الحقول»."
-            : "لم تُؤكَّد بعد: اطبع فاتورة من برنامج الكاشير لتظهر نافذة «تأكيد الحقول».";
+            : "لم تُؤكَّد بعد: اطبع فاتورة من برنامج الكاشير، ثم يؤكد صاحب المحل سطريها من لوحة التحكم.";
         _reconfirm.Enabled = c.Paired && c.FieldsConfirmed;
         var originals = c.Printers.Where(r => !string.IsNullOrEmpty(r.OriginalPort)).Select(r => $"«{r.PrinterName}» ← {r.OriginalPort}").ToList();
         _manualPort.Text = originals.Count > 0

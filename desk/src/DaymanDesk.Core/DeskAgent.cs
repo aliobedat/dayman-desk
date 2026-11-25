@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace DaymanDesk.Core;
 
@@ -34,6 +35,8 @@ public sealed class FieldConfirmation
     public bool FromImage { get; init; }
     /// <summary>The OCR language that read it (FromImage only).</summary>
     public string? OcrLanguage { get; init; }
+    /// <summary>WO-97: names this receipt on the server, so the owner's choice applies only to the lines he saw.</summary>
+    public string SampleId { get; init; } = Guid.NewGuid().ToString();
 }
 
 /// <summary>Problems the status window shows, each with what the cashier or the owner should do.</summary>
@@ -127,6 +130,19 @@ public sealed class DeskAgent
     readonly Dictionary<string, DateTimeOffset> _lastReport = new();
     readonly object _lock = new();
     FieldConfirmation? _pending;
+    // WO-97: the receipt sent to the owner's dashboard («تأكيد الحقول» there), whether the server has it, and
+    // why the owner's last choice was refused (shown to him with the re-sent receipt).
+    FieldConfirmation? _remote;
+    bool _remoteSent;
+    string? _remoteProblem;
+    // WO-97: the last owner choice handled (applied, refused or stale); acknowledged on every heartbeat.
+    string? _appliedSampleId;
+
+    string? AppliedSampleId { get { lock (_lock) return _appliedSampleId; } }
+
+    /// <summary>WO-97: the program's status while the owner has not confirmed the fields on his dashboard.</summary>
+    public const string AwaitingOwner = "بانتظار تأكيد صاحب المحل من لوحة التحكم";
+    public const int MaxSampleLines = 60, MaxSampleChars = 80;
 
     public long LastForwardMs { get; set; }
     public event Action<ReceiptRecord>? ReceiptProcessed;
@@ -347,19 +363,24 @@ public sealed class DeskAgent
             // The first receipt after pairing: the owner confirms the two fields before anything registers.
             // WO-91: the newest receipt replaces the pending one (a better print after a garbled one is the one
             // «تأكيد الحقول» shows); only a receipt with nothing pending (the first, or after «لاحقاً») opens the window.
+            // WO-97: the owner confirms on his dashboard; the first such receipt is the one sent there (his choice
+            // applies to the lines he saw). The window stays for an installer, on a button.
             FieldConfirmation? raise = null;
+            bool send = false;
             var fresh = BuildConfirmation(lines, ext, fromImage, fromImage ? _ocr?.LanguageTag : null);
             lock (_lock)
             {
                 if (_pending == null) raise = fresh;
                 _pending = fresh;
+                if (_remote == null) { _remote = fresh; _remoteSent = false; _remoteProblem = null; send = true; }
             }
-            rec.Status = "بانتظار «تأكيد الحقول»: بلا QR";
+            rec.Status = AwaitingOwner + ": بلا QR";
             if (raise != null)
             {
                 _log.Info("field confirmation requested");
                 ConfirmationNeeded?.Invoke(raise);
             }
+            if (send) await SendFieldsAsync().ConfigureAwait(false);
             return;
         }
         if (ext == null || ext.InvoiceNo == null || ext.Total == null
@@ -790,7 +811,8 @@ public sealed class DeskAgent
             c.FieldsConfirmed = true;
             c.FieldsOcrLanguage = p.FromImage ? p.OcrLanguage : null;
         });
-        lock (_lock) _pending = null;
+        // WO-97: the sample on the owner's dashboard is done too (acknowledged on the next heartbeat).
+        lock (_lock) { if (_remote != null) _appliedSampleId = _remote.SampleId; _pending = null; _remote = null; _remoteProblem = null; }
         _log.Info($"fields confirmed (invoice line {invoiceLine}, total line {totalLine}, of {p.Lines.Count})");
         _ = ReportAsync("info", "other", $"fields confirmed by owner: invoice {(invoiceLine == p.InvoiceLine ? "as detected" : "corrected")}, total {(totalLine == p.TotalLine ? "as detected" : "corrected")}");
         return null;
@@ -807,8 +829,78 @@ public sealed class DeskAgent
     public void RequestReconfirm()
     {
         _cfg.Update(c => { c.FieldsConfirmed = false; c.LearnedInvoice = null; c.LearnedTotal = null; c.FieldsOcrLanguage = null; });
-        lock (_lock) _pending = null;
+        lock (_lock) { _pending = null; _remote = null; _remoteProblem = null; }
         _log.Info("fields confirmation reset by owner");
+    }
+
+    // A Jordanian mobile (07x, 7x, (+|00)?9627x, spaces or dashes allowed), never part of a longer digit run.
+    static readonly Regex PhoneRe = new(@"(?<![0-9])(?:(?:\+|00)?962[\s-]?|0)?7[789](?:[\s-]?[0-9]){7}(?![0-9])", RegexOptions.CultureInvariant);
+
+    /// <summary>WO-97: Latin digits, Jordanian mobile numbers hidden (the server does the same); long invoice numbers stay.</summary>
+    public static string ScrubLine(string line)
+    {
+        var latin = new string(line.Select(ch => ch is >= '\u0660' and <= '\u0669' ? (char)('0' + ch - '\u0660')
+            : ch is >= '\u06F0' and <= '\u06F9' ? (char)('0' + ch - '\u06F0') : ch).ToArray());
+        return PhoneRe.Replace(latin, "[رقم مخفي]");
+    }
+
+    /// <summary>WO-97: the receipt as sent to the owner (POST /fields): the first 60 lines, scrubbed, 80 characters each.</summary>
+    public static FieldsRequest FieldsSample(FieldConfirmation p, string? problem = null)
+    {
+        var lines = p.Lines.Take(MaxSampleLines).Select(l => { var t = ScrubLine(l); return t.Length > MaxSampleChars ? t[..MaxSampleChars] : t; }).ToList();
+        int Index(int i) => i >= 0 && i < lines.Count ? i : -1;
+        return new FieldsRequest(p.SampleId, lines, Index(p.InvoiceLine), Index(p.TotalLine), problem == null ? null : ScrubLine(problem));
+    }
+
+    /// <summary>WO-97: sends the receipt waiting for the owner, once (again after a failure, on the next heartbeat).</summary>
+    public async Task SendFieldsAsync()
+    {
+        FieldConfirmation? p;
+        string? problem;
+        lock (_lock) { p = _remote; problem = _remoteProblem; if (p == null || _remoteSent) return; }
+        var cfg = _cfg.Current;
+        if (!cfg.Paired || p.Lines.Count == 0) return;
+        var res = await _api.FieldsAsync(cfg.DeviceToken!, FieldsSample(p, problem)).ConfigureAwait(false);
+        if (res.Ok) { lock (_lock) if (_remote == p) _remoteSent = true; _log.Info("first receipt sent for the owner's confirmation"); }
+        else if (res.Unauthorized) Unpair(res.Error);
+        else _log.Warn($"fields sample: {res}");
+    }
+
+    /// <summary>
+    /// WO-97: the owner's choice from his dashboard (/heartbeat fieldsConfirmed), applied through the same
+    /// ConfirmFields as the window. Null on success, else the reason (the receipt goes back to him with it).
+    /// </summary>
+    public string? ApplyOwnerFields(FieldsChoice choice)
+    {
+        FieldConfirmation? p;
+        lock (_lock)
+        {
+            if (_appliedSampleId == choice.SampleId) return null; // already handled; the server is waiting for the ack
+            _appliedSampleId = choice.SampleId;
+            p = _remote;
+        }
+        if (p == null || p.SampleId != choice.SampleId)
+        {
+            _log.Warn("owner's fields are for another receipt: ignored");
+            return "not pending";
+        }
+        var err = ConfirmFields(p, choice.InvoiceLine, choice.TotalLine);
+        if (err != null)
+        {
+            _log.Warn("owner's fields refused: sent back to the owner");
+            // Back to the owner under a fresh id, so his next choice is not taken for the one just handled.
+            var again = new FieldConfirmation
+            {
+                Lines = p.Lines, InvoiceLine = p.InvoiceLine, TotalLine = p.TotalLine, InvoiceNo = p.InvoiceNo, Total = p.Total,
+                At = p.At, FromImage = p.FromImage, OcrLanguage = p.OcrLanguage,
+            };
+            lock (_lock)
+            {
+                if (_remote == p) { _remote = again; _remoteProblem = err; _remoteSent = false; }
+                if (_pending == p) _pending = again;
+            }
+        }
+        return err;
     }
 
     /// <summary>Raised when the learned fields were dropped because the OCR language changed (the UI says «أكّد الحقول مرة أخرى»).</summary>
@@ -931,7 +1023,10 @@ public sealed class DeskAgent
     {
         var cfg = _cfg.Current;
         if (!cfg.Paired) return null;
-        var res = await _api.HeartbeatAsync(cfg.DeviceToken!, new HeartbeatRequest(_version, cfg.LastPrintKind, _queue.Count, LastForwardMs)).ConfigureAwait(false);
+        string? problemText = string.IsNullOrEmpty(cfg.LastProblem) ? null : ScrubLine(Problems.Describe(cfg.LastProblem, cfg.LastProblemDetail));
+        if (problemText?.Length > 400) problemText = problemText[..400];
+        var res = await _api.HeartbeatAsync(cfg.DeviceToken!, new HeartbeatRequest(_version, cfg.LastPrintKind, _queue.Count, LastForwardMs,
+            string.IsNullOrEmpty(cfg.LastProblem) ? null : cfg.LastProblem, problemText, AppliedSampleId)).ConfigureAwait(false);
         if (res.Ok && res.Value != null)
         {
             var v = res.Value;
@@ -944,6 +1039,8 @@ public sealed class DeskAgent
             });
             ClearProblem(Problems.Offline, Problems.RateLimited);
             if (newer) UpdateAvailable?.Invoke(v.LatestVersion!.Trim(), v.DownloadUrl!);
+            if (v.FieldsConfirmed != null) ApplyOwnerFields(v.FieldsConfirmed);
+            await SendFieldsAsync().ConfigureAwait(false);
             await FlushQueueAsync().ConfigureAwait(false);
             await EnsureKeyAsync().ConfigureAwait(false);
             await RefillPoolAsync().ConfigureAwait(false);
@@ -1016,7 +1113,7 @@ public sealed class DeskAgent
                 c.FieldsConfirmed = false; c.LearnedInvoice = null; c.LearnedTotal = null;
                 if (c.LastProblem is Problems.Revoked or Problems.TokenUnreadable) { c.LastProblem = null; c.LastProblemDetail = null; c.LastProblemAt = null; }
             });
-            lock (_lock) _pending = null;
+            lock (_lock) { _pending = null; _remote = null; _remoteProblem = null; }
             _keyRefused = false;
             _log.Info("paired with shop");
         }

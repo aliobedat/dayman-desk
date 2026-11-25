@@ -115,6 +115,77 @@ public static class ConfirmationTests
         Assert.True(!dup.QrPrinted && rig.Receipts == before, "two lines of the total's shape: no qr, not sent");
     }
 
+    /// <summary>WO-97: the owner's choice from the dashboard (via /heartbeat) learns exactly what the window learns.</summary>
+    public static async Task TestOwnerFieldsFromDashboardEqualLocalConfirm()
+    {
+        var job = DaymanDesk.Tests.Receipts.Utf8(DaymanDesk.Tests.Receipts.Arabic);
+        var local = new Rig();
+        await local.Agent.ProcessJobAsync(job, 5, 1);
+        Assert.Equal<string?>(null, local.Agent.ConfirmFields(local.Asked[0], 3, 9), "local confirm");
+
+        var remote = new Rig();
+        await remote.Agent.ProcessJobAsync(job, 5, 1);
+        var sent = remote.Http.Calls.Where(c => c.req.RequestUri!.AbsolutePath.EndsWith("/fields")).Select(c => c.body).ToList();
+        Assert.Equal(1, sent.Count, "the first receipt goes to the owner once");
+        Assert.True(!sent[0].Contains("0791234567"), "phone scrubbed on the device");
+        Assert.True(!remote.Cfg.Current.FieldsConfirmed, "nothing learned before the owner confirms");
+        string sampleId = JsonDocument.Parse(sent[0]).RootElement.GetProperty("sampleId").GetString()!;
+        remote.Http.Respond = (r, _) => r.RequestUri!.AbsolutePath.EndsWith("/heartbeat")
+            ? FakeHandler.Json(200, "{\"serverTime\":\"x\",\"qrEnabled\":true,\"codeValidityDays\":2,\"fieldsConfirmed\":{\"sampleId\":\"" + sampleId + "\",\"invoiceLine\":3,\"totalLine\":9}}")
+            : new HttpResponseMessage(System.Net.HttpStatusCode.NoContent);
+        await remote.Agent.HeartbeatAsync();
+        Assert.True(remote.Cfg.Current.FieldsConfirmed, "confirmed from the dashboard");
+        Assert.Equal(JsonSerializer.Serialize(local.Cfg.Current.LearnedInvoice), JsonSerializer.Serialize(remote.Cfg.Current.LearnedInvoice), "invoice field");
+        Assert.Equal(JsonSerializer.Serialize(local.Cfg.Current.LearnedTotal), JsonSerializer.Serialize(remote.Cfg.Current.LearnedTotal), "total field");
+        // A lost answer: the server repeats the choice until the next heartbeat acknowledges it; it is applied once.
+        await remote.Agent.HeartbeatAsync();
+        var acks = remote.Http.Calls.Where(c => c.req.RequestUri!.AbsolutePath.EndsWith("/heartbeat")).Select(c => c.body).ToList();
+        Assert.Equal(sampleId, JsonDocument.Parse(acks[^1]).RootElement.GetProperty("fieldsApplied").GetString(), "acknowledged");
+        Assert.Equal(1, remote.Http.Calls.Count(c => c.req.RequestUri!.AbsolutePath.EndsWith("/report") && c.body.Contains("fields confirmed")), "applied once");
+    }
+
+    static string HeartbeatWith(string sampleId, int inv, int tot) =>
+        "{\"serverTime\":\"x\",\"qrEnabled\":true,\"codeValidityDays\":2,\"fieldsConfirmed\":{\"sampleId\":\"" + sampleId + "\",\"invoiceLine\":" + inv + ",\"totalLine\":" + tot + "}}";
+    static List<string> Bodies(Rig r, string path) => r.Http.Calls.Where(c => c.req.RequestUri!.AbsolutePath.EndsWith(path)).Select(c => c.body).ToList();
+
+    /// <summary>WO-97: a refused owner choice goes back under a fresh id; his next choice applies.</summary>
+    public static async Task TestRefusedOwnerFieldsResendWithFreshId()
+    {
+        var rig = new Rig();
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Utf8(DaymanDesk.Tests.Receipts.Arabic), 5, 1);
+        string first = JsonDocument.Parse(Bodies(rig, "/fields")[0]).RootElement.GetProperty("sampleId").GetString()!;
+        string reply = HeartbeatWith(first, 0, 1);
+        rig.Http.Respond = (r, _) => r.RequestUri!.AbsolutePath.EndsWith("/heartbeat") ? FakeHandler.Json(200, reply)
+            : new HttpResponseMessage(System.Net.HttpStatusCode.NoContent);
+        await rig.Agent.HeartbeatAsync();
+        Assert.True(!rig.Cfg.Current.FieldsConfirmed, "lines without the fields are refused");
+        var resent = JsonDocument.Parse(Bodies(rig, "/fields")[^1]).RootElement;
+        string second = resent.GetProperty("sampleId").GetString()!;
+        Assert.True(second != first && resent.TryGetProperty("problem", out _), "re-sent with a fresh id and the reason");
+        reply = HeartbeatWith(second, 3, 9);
+        await rig.Agent.HeartbeatAsync();
+        Assert.True(rig.Cfg.Current.FieldsConfirmed, "the owner's second choice applies");
+    }
+
+    /// <summary>WO-97: an installer's confirmation on the PC ends the sample on the dashboard (fieldsApplied).</summary>
+    public static async Task TestLocalConfirmAcknowledgesTheDashboardSample()
+    {
+        var rig = new Rig();
+        await rig.Agent.ProcessJobAsync(DaymanDesk.Tests.Receipts.Utf8(DaymanDesk.Tests.Receipts.Arabic), 5, 1);
+        string id = JsonDocument.Parse(Bodies(rig, "/fields")[0]).RootElement.GetProperty("sampleId").GetString()!;
+        Assert.Equal<string?>(null, rig.Agent.ConfirmFields(rig.Asked[0], 3, 9), "local confirm");
+        await rig.Agent.HeartbeatAsync();
+        Assert.Equal(id, JsonDocument.Parse(Bodies(rig, "/heartbeat")[^1]).RootElement.GetProperty("fieldsApplied").GetString(), "acknowledged");
+    }
+
+    public static void TestScrubHidesOnlyJordanianMobiles()
+    {
+        foreach (var phone in new[] { "0791234567", "079 123 4567", "791234567", "+962791234567", "00962-79-123-4567", "٠٧٨١٢٣٤٥٦٧" })
+            Assert.True(!DeskAgent.ScrubLine("هاتف: " + phone).Any(char.IsDigit), "hidden: " + phone);
+        Assert.Equal("رقم الفاتورة: 202611260001", DeskAgent.ScrubLine("رقم الفاتورة: 202611260001"), "a long invoice number stays");
+        Assert.Equal("INV 10432", DeskAgent.ScrubLine("INV ١٠٤٣٢"), "Latin digits");
+    }
+
     public static async Task TestConfirmValidationMatchesTheWindow()
     {
         var rig = new Rig();
