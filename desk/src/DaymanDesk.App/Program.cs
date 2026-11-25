@@ -6,6 +6,17 @@ namespace DaymanDesk.App;
 
 static class Program
 {
+    static Mutex? _single;
+
+    /// <summary>WO-96: the old version lets the new one start (call on the main thread, the mutex owner).</summary>
+    public static void ReleaseSingle() { try { _single?.ReleaseMutex(); } catch (ApplicationException) { } }
+
+    /// <summary>WO-96: the update was rolled back; this process owns the program again.</summary>
+    public static bool RetakeSingle()
+    {
+        try { return _single?.WaitOne(5000) ?? false; } catch (AbandonedMutexException) { return true; }
+    }
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -25,8 +36,18 @@ static class Program
         if (selftest >= 0 && selftest + 1 < args.Length) return OcrSelfTest(args[selftest + 1]);
         int signtest = Array.IndexOf(args, "--sign-selftest");
         if (signtest >= 0 && signtest + 1 < args.Length) return SignSelfTest(args[signtest + 1]);
+        int updtest = Array.IndexOf(args, "--update-selftest");
+        if (updtest >= 0 && updtest + 2 < args.Length) return AutoUpdate.SelfTest(args[updtest + 1], args[updtest + 2]);
+        int from = Array.IndexOf(args, "--updated-from");
+        string? updatedFrom = from >= 0 && from + 1 < args.Length ? args[from + 1] : null;
 
         using var single = new Mutex(true, @"Global\DaymanDesk.App", out bool first);
+        // WO-96: started by the previous version, which releases the mutex just before.
+        if (!first && updatedFrom != null)
+        {
+            try { first = single.WaitOne(15000); } catch (AbandonedMutexException) { first = true; }
+        }
+        _single = single;
         if (!first)
         {
             if (!args.Contains("--tray"))
@@ -58,6 +79,7 @@ static class Program
         TaskScheduler.UnobservedTaskException += (_, e) => { rt.Log.Error("task error " + e.Exception.Message); e.SetObserved(); };
 
         rt.Start();
+        if (updatedFrom != null) rt.UpdatedFrom(updatedFrom);
         Application.Run(new MainForm(rt, startHidden: args.Contains("--tray")));
         return 0;
     }

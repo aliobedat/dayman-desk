@@ -103,6 +103,44 @@ jobs:
           Get-Content $out
           if ($p.ExitCode -ne 0) { throw "signing self-test failed" }
 
+      # WO-96: the update signature path on .NET Framework, with a throwaway key made here (the real key is not needed).
+      - name: Update self-test
+        shell: pwsh
+        run: |
+          $k = [Security.Cryptography.ECDsa]::Create([Security.Cryptography.ECCurve+NamedCurves]::nistP256)
+          $exe = Join-Path $pwd "desk/publish/DaymanDesk.exe"
+          $t = Join-Path $env:RUNNER_TEMP "update-selftest.exe"
+          Copy-Item $exe $t
+          $sig = $k.SignData([IO.File]::ReadAllBytes($t), [Security.Cryptography.HashAlgorithmName]::SHA256)
+          [IO.File]::WriteAllText("$t.sig", [Convert]::ToBase64String($sig))
+          $env:DESK_UPDATE_TEST_SPKI = [Convert]::ToBase64String($k.ExportSubjectPublicKeyInfo())
+          $out = Join-Path $env:RUNNER_TEMP "update-selftest.txt"
+          $p = Start-Process $exe -ArgumentList '--update-selftest', "`"$t`"", "`"$out`"" -PassThru -Wait
+          Get-Content $out
+          if ($p.ExitCode -ne 0) { throw "update self-test failed" }
+
+      # WO-96: master and desk-v tags sign the exe for the silent update (DaymanDesk.exe.sig: base64 P1363, ECDSA P-256,
+      # SHA-256) and check it against the key built into the program. No secret: a warning, no .sig.
+      - name: Sign for auto-update
+        if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/desk-v')
+        shell: pwsh
+        env:
+          DESK_UPDATE_KEY: ${{ secrets.DESK_UPDATE_KEY }}
+        run: |
+          if (-not $env:DESK_UPDATE_KEY) { Write-Host "::warning::DESK_UPDATE_KEY is not set: the release has no DaymanDesk.exe.sig, shops will not update by themselves"; exit 0 }
+          $exe = Join-Path $pwd "desk/publish/DaymanDesk.exe"
+          $k = [Security.Cryptography.ECDsa]::Create()
+          $n = 0
+          $k.ImportPkcs8PrivateKey([Convert]::FromBase64String($env:DESK_UPDATE_KEY), [ref]$n)
+          $env:DESK_UPDATE_KEY = $null
+          $sig = $k.SignData([IO.File]::ReadAllBytes($exe), [Security.Cryptography.HashAlgorithmName]::SHA256)
+          $k.Dispose()
+          [IO.File]::WriteAllText("$exe.sig", [Convert]::ToBase64String($sig))
+          $out = Join-Path $env:RUNNER_TEMP "update-verify.txt"
+          $p = Start-Process $exe -ArgumentList '--update-selftest', "`"$exe`"", "`"$out`"" -PassThru -Wait
+          Get-Content $out
+          if ($p.ExitCode -ne 0) { throw "the signature does not verify with the key built into the program (wrong DESK_UPDATE_KEY?)" }
+
       - name: Version and SHA256
         id: meta
         shell: pwsh
@@ -154,6 +192,7 @@ jobs:
           path: |
             desk/publish/DaymanDesk.exe
             desk/publish/DaymanDesk.exe.sha256
+            desk/publish/DaymanDesk.exe.sig
             desk/publish/REPORT.md
           if-no-files-found: error
 
@@ -163,8 +202,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          files="desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md"
+          if [ -f desk/publish/DaymanDesk.exe.sig ]; then files="$files desk/publish/DaymanDesk.exe.sig"; fi
           gh release delete desk-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-          gh release create desk-latest desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md \
+          gh release create desk-latest $files \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
             --title "دايماً ديسك ${{ steps.meta.outputs.version }} (آخر نسخة)" \
             --notes "الإصدار ${{ steps.meta.outputs.version }}، آخر بناء ناجح من master (${GITHUB_SHA::7}). SHA256: ${{ steps.meta.outputs.sha }}. التثبيت والاختبار: REPORT.md"
@@ -174,7 +215,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: >
-          gh release create "$GITHUB_REF_NAME" desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md
-          --repo "$GITHUB_REPOSITORY" --prerelease --title "دايماً ديسك $GITHUB_REF_NAME"
-          --notes "نسخة تجريبية من دايماً ديسك. التثبيت والاختبار: desk/REPORT.md"
+        run: |
+          files="desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md"
+          if [ -f desk/publish/DaymanDesk.exe.sig ]; then files="$files desk/publish/DaymanDesk.exe.sig"; fi
+          gh release create "$GITHUB_REF_NAME" $files \
+            --repo "$GITHUB_REPOSITORY" --prerelease --title "دايماً ديسك $GITHUB_REF_NAME" \
+            --notes "نسخة تجريبية من دايماً ديسك. التثبيت والاختبار: desk/REPORT.md"

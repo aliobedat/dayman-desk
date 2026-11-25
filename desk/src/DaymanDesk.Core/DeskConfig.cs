@@ -119,6 +119,12 @@ public sealed class DeskConfig
     // Update check (heartbeat latestVersion / downloadUrl); null when this build is current.
     public string? UpdateVersion { get; set; }
     public string? UpdateUrl { get; set; }
+    // WO-96: the silent auto-update. One attempt per hour; a version that failed is skipped for 24 hours.
+    public DateTimeOffset? UpdateLastAttempt { get; set; }
+    public string? UpdateBadVersion { get; set; }
+    public DateTimeOffset? UpdateBadUntil { get; set; }
+    /// <summary>The version this program updated itself to (the status window says «تم التحديث إلى»).</summary>
+    public string? UpdatedTo { get; set; }
 
     // Today's counters (local day) and the last problem, for the status window.
     public string? StatsDay { get; set; }

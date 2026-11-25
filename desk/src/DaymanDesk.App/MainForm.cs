@@ -267,7 +267,14 @@ sealed class MainForm : Form
             RefreshState();
             if (_announcedUpdate == v) return;
             _announcedUpdate = v;
-            _tray.ShowBalloonTip(5000, "دايماً ديسك", Ui.Latin($"يوجد تحديث: الإصدار {v}. افتح البرنامج للتنزيل."), ToolTipIcon.Info);
+            _tray.ShowBalloonTip(5000, "دايماً ديسك", Ui.Latin($"يوجد تحديث: الإصدار {v}. سيحدّث البرنامج نفسه تلقائياً حين لا تُطبع فواتير."), ToolTipIcon.Info);
+        });
+        _rt.UpdateReady += (v, path) => BeginInvokeSafe(() =>
+        {
+            if (!AutoUpdate.Apply(_rt, v, path)) { RefreshState(); return; }
+            _exiting = true; // the new version listens on the same ports: no restore
+            _tray.Visible = false;
+            Application.Exit();
         });
         Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => _rt.ExitRestore();
 
@@ -589,7 +596,8 @@ sealed class MainForm : Form
             : !c.FieldsConfirmed ? "بعد «تأكيد الحقول» في أول فاتورة" : "يعمل";
         int q = _rt.Queue.Count;
         _info["بانتظار الإرسال"].Text = q == 0 ? "لا شيء" : q.ToString(CultureInfo.InvariantCulture) + " (تُرسل عند عودة الاتصال)";
-        _info["الإصدار"].Text = Runtime.Version + (c.UpdateVersion != null ? $"  (يوجد تحديث: {c.UpdateVersion})" : "  (أحدث إصدار)");
+        _info["الإصدار"].Text = Runtime.Version + (c.UpdateVersion != null ? $"  (يوجد تحديث: {c.UpdateVersion})"
+            : c.UpdatedTo == Runtime.Version ? $"  (تم التحديث إلى {Runtime.Version})" : "  (أحدث إصدار)");
 
         string today = DateTimeOffset.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         bool isToday = c.StatsDay == today;
@@ -624,7 +632,7 @@ sealed class MainForm : Form
 
         _confirmBanner.Visible = c.Paired && !c.FieldsConfirmed && _rt.Agent.PendingConfirmation != null;
         _updateBanner.Visible = c.UpdateVersion != null && c.UpdateUrl != null;
-        _updateText.Text = $"يوجد تحديث: الإصدار {c.UpdateVersion}. نزّله ثم أغلق البرنامج من الأيقونة بجانب الساعة وشغّل الملف الجديد.";
+        _updateText.Text = $"يوجد تحديث: الإصدار {c.UpdateVersion}. يحدّث البرنامج نفسه تلقائياً حين لا تُطبع فواتير. إن لم يتم، نزّله وأغلق البرنامج من الأيقونة بجانب الساعة وشغّل الملف الجديد.";
         _trayUpdate.Visible = _updateBanner.Visible;
         _trayUpdate.Text = Ui.Latin($"يوجد تحديث: الإصدار {c.UpdateVersion}");
 

@@ -85,6 +85,12 @@ Request `{ "appVersion": "1.0.0", "printKind": "text"|"image"|"unknown", "queueL
 - **v1.1** program: if `latestVersion` is newer than its own version and `downloadUrl` is https, the window and the
   tray show «يوجد تحديث» with the link. No silent self-update in 1.0. A missing, older, equal or malformed value, or
   a non-https link, shows nothing.
+- **WO-96** (program 2.1, no contract change): the program updates itself silently. `DESK_DOWNLOAD_URL` must point to
+  the exe itself (e.g. `https://github.com/aliobedat/dayman-desk/releases/download/desk-latest/DaymanDesk.exe`, not a page);
+  its signature sits at the same URL + `.sig` (base64 ECDSA P-256 / SHA-256, IEEE P1363, made by CI with
+  `DESK_UPDATE_KEY`). Every hop must be https on github.com, objects.githubusercontent.com,
+  release-assets.githubusercontent.com or daymanjo.com. An exe whose signature or file version does not match is
+  never run; the download link stays the manual fallback.
 
 ## POST /report
 Request `{ "level": "info"|"warn"|"error", "kind": "parse_failed"|"unknown_format"|"slow_forward"|"crash"|"sample"|"other", "message": "≤2000 chars, never a phone or name", "appVersion": "0.1.0", "sample": "<base64, ≤64 KB, optional>" }`

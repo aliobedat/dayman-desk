@@ -63,6 +63,13 @@ public sealed class PassThroughServer
     }
 
     public bool Running => !_lanes.IsEmpty;
+
+    int _open;
+    long _lastEndTicks;
+    /// <summary>WO-96: connections being received or proxied right now (the update waits for none).</summary>
+    public int OpenConnections => Volatile.Read(ref _open);
+    /// <summary>WO-96: when the last connection (a job) ended; null before the first.</summary>
+    public DateTimeOffset? LastJobAt => Interlocked.Read(ref _lastEndTicks) is long t && t > 0 ? new DateTimeOffset(t, TimeSpan.Zero) : null;
     public bool IsRunning(string routeId) => _lanes.ContainsKey(routeId);
 
     public bool Start(PrinterRoute route)
@@ -141,7 +148,16 @@ public sealed class PassThroughServer
             catch (OperationCanceledException) { return; }
             catch (ObjectDisposedException) { return; }
             catch (SocketException ex) { _log.Warn("accept: " + ex.Message); continue; }
-            _ = Task.Run(() => lane.Route.Lan ? Proxy(lane, c, ct) : Receive(lane, c, ct));
+            Interlocked.Increment(ref _open);
+            _ = Task.Run(async () =>
+            {
+                try { await (lane.Route.Lan ? Proxy(lane, c, ct) : Receive(lane, c, ct)); }
+                finally
+                {
+                    Interlocked.Exchange(ref _lastEndTicks, DateTimeOffset.UtcNow.UtcTicks);
+                    Interlocked.Decrement(ref _open);
+                }
+            });
         }
     }
 

@@ -19,6 +19,8 @@ sealed class Runtime : IDisposable
     public readonly PrinterSetup Setup;
     public readonly PassThroughServer Server;
     public readonly TesseractOcr Ocr;
+    /// <summary>The data folder is SYSTEM + Administrators only (WO-96: no auto-update otherwise).</summary>
+    public readonly bool DataDirLocked;
     readonly HttpClient _http;
     System.Threading.Timer? _heartbeat;
     public DeskAgent Agent { get; private set; }
@@ -27,6 +29,8 @@ sealed class Runtime : IDisposable
     public event Action? StateChanged;
     public event Action<FieldConfirmation>? ConfirmationNeeded;
     public event Action<string, string>? UpdateAvailable;
+    /// <summary>WO-96: a newer signed exe was downloaded and verified (version, path): the UI thread applies it.</summary>
+    public event Action<string, string>? UpdateReady;
     /// <summary>WO-91: the OCR language changed and the learned fields were dropped.</summary>
     public event Action? ReconfirmNeeded;
 
@@ -34,7 +38,7 @@ sealed class Runtime : IDisposable
     {
         Directory.CreateDirectory(DataDir);
         Log = new RollingLog(Path.Combine(DataDir, "logs"));
-        bool locked = Installer.LockDataDir(Log); // before the token is ever written
+        bool locked = DataDirLocked = Installer.LockDataDir(Log); // before the token is ever written
         Cfg = OpenConfig(Log);
         Samples = new SampleStore(Path.Combine(DataDir, "samples"));
         Queue = new OfflineQueue(Path.Combine(DataDir, "queue.json"));
@@ -158,8 +162,51 @@ sealed class Runtime : IDisposable
 
     async Task SafeHeartbeat()
     {
-        try { await Agent.HeartbeatAsync(); StateChanged?.Invoke(); }
+        try
+        {
+            var res = await Agent.HeartbeatAsync();
+            StateChanged?.Invoke();
+            if (res?.Ok == true)
+            {
+                AutoUpdate.AfterGoodHeartbeat(this);
+                await AutoUpdate.TryAsync(this);
+            }
+        }
         catch (Exception ex) { Log.Error("heartbeat: " + ex.Message); }
+    }
+
+    public void RaiseUpdateReady(string version, string path)
+    {
+        if (UpdateReady == null) { try { File.Delete(path); File.Delete(path + ".sig"); } catch { } return; }
+        UpdateReady.Invoke(version, path);
+    }
+
+    /// <summary>WO-96: before the hand-over: no heartbeat, no listener (the printers stay pointed at the ports).</summary>
+    public void Suspend()
+    {
+        _heartbeat?.Dispose();
+        _heartbeat = null;
+        Server.StopAll();
+    }
+
+    /// <summary>WO-96: the hand-over was rolled back: listen again as at start.</summary>
+    public void Resume()
+    {
+        if (Cfg.Current.Active) StartPrinters();
+        StartNetwork();
+        _heartbeat ??= new System.Threading.Timer(_ => _ = SafeHeartbeat(), null, HeartbeatEvery, HeartbeatEvery);
+        StateChanged?.Invoke();
+    }
+
+    /// <summary>WO-96: this process was started by the previous version: say so to it and in the window.</summary>
+    public void UpdatedFrom(string previous)
+    {
+        Log.Info($"update: {previous} -> {Version}");
+        Cfg.Update(c => { c.UpdatedTo = Version; c.UpdateVersion = null; c.UpdateUrl = null; });
+        Agent.ClearProblem(Problems.UpdateInstallFailed);
+        try { if (EventWaitHandle.TryOpenExisting(AutoUpdate.UpEvent, out var up)) using (up) up.Set(); }
+        catch (Exception ex) { Log.Warn("update: signal failed: " + ex.Message); }
+        StateChanged?.Invoke();
     }
 
     public void Install(IReadOnlyList<string> printers)
