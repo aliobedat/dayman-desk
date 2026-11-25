@@ -35,6 +35,26 @@ jobs:
             Write-Host "$l $((Get-Item "$d/$l.traineddata").Length) bytes"
           }
 
+      # WO-98: IBM Plex Sans Arabic (SIL OFL 1.1) 400 and 600, embedded in the exe; not kept in git.
+      - name: UI font
+        shell: pwsh
+        run: |
+          $d = "desk/src/DaymanDesk.App/fonts"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          # Pinned google/fonts commit and the expected SHA-256 of each file.
+          $commit = "6ebe737e44fd64ee736bbc6feed6136a6dbfd222"
+          $want = @{
+            "IBMPlexSansArabic-Regular.ttf"  = "6f611412270a132bbac838da9259d4c68569b4175f3b3b8fa3fa36a30b56dab9"
+            "IBMPlexSansArabic-SemiBold.ttf" = "597bd5502e5997be4414e4c9c88834b30ff3784250c84f20bce2b20e53ebd467"
+            "OFL.txt"                        = "7e6b2818edbd8f6a01ae80641cc8f16a51080d08fb4e532be3a0b6f74adb07da"
+          }
+          foreach ($f in $want.Keys) {
+            Invoke-WebRequest "https://raw.githubusercontent.com/google/fonts/$commit/ofl/ibmplexsansarabic/$f" -OutFile "$d/$f"
+            $h = (Get-FileHash "$d/$f" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($h -ne $want[$f]) { throw "$f SHA-256 mismatch: $h" }
+            Write-Host "$f $((Get-Item "$d/$f").Length) bytes, SHA-256 ok"
+          }
+
       # WO-95b: the VC++ 2015-2022 runtime and the UCRT, shipped app-local next to the OCR natives (a bare Windows 7).
       - name: VC++ runtime
         shell: powershell

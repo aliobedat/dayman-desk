@@ -12,7 +12,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DaymanDesk</AssemblyName>
     <RootNamespace>DaymanDesk.App</RootNamespace>
-    <Version>2.2.0</Version>
+    <Version>2.3.0</Version>
     <Product>دايماً ديسك</Product>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
@@ -42,6 +42,9 @@
     <EmbeddedResource Include="vcrt\x64\*.dll" LogicalName="ocr/x64/%(Filename)%(Extension)" />
     <EmbeddedResource Include="vcrt\x86\*.dll" LogicalName="ocr/x86/%(Filename)%(Extension)" />
     <!-- tessdata_fast eng + ara, downloaded by CI (desk.yml) into tessdata/ (not in git). -->
+    <!-- WO-98: IBM Plex Sans Arabic 400/600 and its OFL, downloaded by CI (desk.yml) into fonts/ (not in git). -->
+    <EmbeddedResource Include="fonts\*.ttf" LogicalName="fonts/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="fonts\OFL.txt" LogicalName="fonts/OFL.txt" Condition="Exists('fonts\OFL.txt')" />
     <EmbeddedResource Include="tessdata\*.traineddata" LogicalName="ocr/tessdata/%(Filename)%(Extension)" />
   </ItemGroup>
 

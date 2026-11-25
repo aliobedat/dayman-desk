@@ -40,14 +40,15 @@ sealed class ConfirmFieldsForm : Form
         ShowInTaskbar = false;
         Icon = AppIcon.Value;
 
-        var intro = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16, 12, 16, 4), BackColor = Ui.Canvas };
+        var intro = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(20, 16, 20, 8), BackColor = Ui.Canvas };
         intro.Controls.Add(Ui.Text("هذه أول فاتورة بعد ربط الجهاز.", Ui.Heading));
         intro.Controls.Add(Ui.Text("تأكد أن البرنامج اختار السطر الصحيح لرقم الفاتورة وللمجموع النهائي (المبلغ الذي دفعه الزبون). " +
             "إن كان أحدهما خطأ فاضغط على السطر الصحيح ثم على الزر المناسب. يحفظ البرنامج اختيارك ويستخدمه في كل الفواتير التالية.",
             Ui.Body, Ui.Ink, 680));
 
-        var listHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(16, 4, 16, 4), BackColor = Ui.Canvas };
-        var border = new Panel { Dock = DockStyle.Fill, Padding = new Padding(1), BackColor = Ui.Line };
+        var listHost = new Panel { Dock = DockStyle.Fill, Padding = new Padding(20, 4, 20, 4), BackColor = Ui.Canvas };
+        var border = new Card("", 0) { Dock = DockStyle.Fill, AutoSize = false, MinimumSize = Size.Empty, MaximumSize = Size.Empty, Padding = new Padding(12, 10, 12, 12) };
+        border.Controls.Clear();
         border.Controls.Add(_lines);
         listHost.Controls.Add(border);
         foreach (var l in p.Lines) _lines.Items.Add(l);
@@ -71,7 +72,7 @@ sealed class ConfirmFieldsForm : Form
         later.DialogResult = DialogResult.Cancel;
         _ok.Click += (_, _) => Confirm();
 
-        var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(16, 4, 16, 12), BackColor = Ui.Canvas };
+        var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Padding = new Padding(20, 8, 20, 16), BackColor = Ui.Canvas };
         bottom.Controls.Add(Ui.Row(setInvoice, setTotal));
         bottom.Controls.Add(values);
         bottom.Controls.Add(Ui.Text("لا تُسجَّل الفواتير ولا يُطبع QR حتى تضغط «تأكيد وحفظ».", Ui.Body, Ui.Muted, 680));
@@ -133,7 +134,7 @@ sealed class ConfirmFieldsForm : Form
         using (var b = new SolidBrush(back)) e.Graphics.FillRectangle(b, e.Bounds);
         if (sel)
         {
-            using var pen = new Pen(Ui.Ink, 2);
+            using var pen = new Pen(Ui.Accent, 2);
             e.Graphics.DrawRectangle(pen, e.Bounds.X + 1, e.Bounds.Y + 1, e.Bounds.Width - 3, e.Bounds.Height - 3);
         }
         var rect = new Rectangle(e.Bounds.X + 8, e.Bounds.Y, e.Bounds.Width - 16, e.Bounds.Height);

@@ -7,102 +7,6 @@ using DaymanDesk.Core;
 
 namespace DaymanDesk.App;
 
-/// <summary>Colours and fonts of the Dayman design system (wala-design), mapped to WinForms.</summary>
-static class Ui
-{
-    public static readonly Color Canvas = Hex(0xF4F3F1), Surface = Color.White, Line = Hex(0xE6E4E0), ControlLine = Hex(0xD9D6D0),
-        Ink = Hex(0x16181C), Muted = Hex(0x5C6169), Success = Hex(0x1F6B43), SuccessBg = Hex(0xE7F5EC),
-        Warning = Hex(0x6B3E06), WarningBg = Hex(0xFFF4E5), Danger = Hex(0x9B2C1F), DangerBg = Hex(0xFDECEA);
-
-    // Readex Pro is not on Windows; Segoe UI carries Arabic on every Windows 10/11. Numbers and codes in Consolas.
-    public static readonly Font Body = new("Segoe UI", 10f);
-    public static readonly Font Strong = new("Segoe UI Semibold", 10f);
-    public static readonly Font Heading = new("Segoe UI Semibold", 11.5f);
-    public static readonly Font Title = new("Segoe UI Semibold", 15f);
-    public static readonly Font Mono = new("Consolas", 10f);
-    public static readonly Font BigNumber = new("Consolas", 20f, FontStyle.Bold);
-
-    static Color Hex(int v) => Color.FromArgb((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF);
-
-    public static Button Primary(string text) => new()
-    {
-        Text = text, AutoSize = true, MinimumSize = new Size(0, 40), Padding = new Padding(14, 4, 14, 4),
-        FlatStyle = FlatStyle.Flat, BackColor = Ink, ForeColor = Color.White, Font = Strong,
-        FlatAppearance = { BorderSize = 0 }, Cursor = Cursors.Hand, Margin = new Padding(4),
-    };
-
-    public static Button Secondary(string text) => new()
-    {
-        Text = text, AutoSize = true, MinimumSize = new Size(0, 40), Padding = new Padding(12, 4, 12, 4),
-        FlatStyle = FlatStyle.Flat, BackColor = Surface, ForeColor = Ink, Font = Body,
-        FlatAppearance = { BorderColor = ControlLine, BorderSize = 1 }, Cursor = Cursors.Hand, Margin = new Padding(4),
-    };
-
-    public static Label Text(string text, Font? font = null, Color? color = null, int maxWidth = 0) => new()
-    {
-        Text = text, AutoSize = true, Font = font ?? Body, ForeColor = color ?? Ink, Margin = new Padding(4, 6, 4, 6),
-        MaximumSize = maxWidth > 0 ? new Size(maxWidth, 0) : Size.Empty, UseMnemonic = false,
-    };
-
-    public static FlowLayoutPanel Row(params Control[] items)
-    {
-        var f = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 2, 0, 2), BackColor = Color.Transparent };
-        f.Controls.AddRange(items);
-        return f;
-    }
-
-    public static void OpenUrl(string url)
-    {
-        if (!SemVer.SafeUrl(url)) return;
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); } catch { }
-    }
-
-    /// <summary>
-    /// WO-91: U+206F NOMINAL DIGIT SHAPES. Windows with an Arabic locale and native digits draws 0-9 as ١٠٠١ in every
-    /// GDI text (labels, lists, menus, message boxes, the tray tooltip); GDI draws the digits after this invisible
-    /// mark as 0-9 whatever that setting (it is stronger than ETO_NUMERICSLATIN). Project rule: Latin digits only.
-    /// </summary>
-    public const char Nods = '⁯';
-    public const string NodsText = "⁯";
-    static readonly Regex DigitRun = new(@"(?<![0-9⁯])(?=[0-9])", RegexOptions.Compiled);
-
-    /// <summary>The text with Latin digits for display: Arabic-Indic digits become 0-9, «٫» becomes '.', and U+206F
-    /// goes before each digit run (each line of a wrapped label keeps it). Idempotent.</summary>
-    public static string Latin(string? s)
-    {
-        if (string.IsNullOrEmpty(s)) return s ?? "";
-        var sb = new StringBuilder(s.Length + 4);
-        foreach (char ch in s)
-        {
-            if (ch >= '٠' && ch <= '٩') sb.Append((char)('0' + (ch - '٠')));
-            else if (ch >= '۰' && ch <= '۹') sb.Append((char)('0' + (ch - '۰')));
-            else if (ch == '٫') sb.Append('.');
-            else sb.Append(ch);
-        }
-        return DigitRun.Replace(sb.ToString(), NodsText);
-    }
-
-    /// <summary>
-    /// Keeps the digits of every label, button, check box, tab and form title under <paramref name="root"/> Latin,
-    /// now and on every later Text change (text boxes are LatinTextBox; list items and the tray call Latin).
-    /// </summary>
-    public static void LatinDigits(Control root)
-    {
-        if (root is Label or ButtonBase or TabPage or GroupBox or Form)
-        {
-            FixDigits(root);
-            root.TextChanged += (_, _) => FixDigits(root);
-        }
-        foreach (Control child in root.Controls) LatinDigits(child);
-        root.ControlAdded += (_, e) => { if (e.Control != null) LatinDigits(e.Control); };
-    }
-
-    static void FixDigits(Control c)
-    {
-        string t = c.Text, l = Latin(t);
-        if (l != t) c.Text = l;
-    }
-}
 
 /// <summary>
 /// WO-91: a text box whose digits show as 0-9 on Arabic Windows with native digits. Its window text starts with
@@ -110,6 +14,8 @@ static class Ui
 /// </summary>
 sealed class LatinTextBox : TextBox
 {
+    public LatinTextBox() => BorderStyle = BorderStyle.FixedSingle;
+
     [AllowNull]
     public override string Text
     {
@@ -136,34 +42,6 @@ sealed class LatinTextBox : TextBox
     }
 }
 
-/// <summary>A white card with a 1px line border and a heading (no shadows, per the design system).</summary>
-sealed class Card : Panel
-{
-    readonly FlowLayoutPanel _body;
-
-    public Card(string heading, int width)
-    {
-        BackColor = Ui.Surface;
-        Padding = new Padding(18, 14, 18, 14);
-        Margin = new Padding(0, 0, 0, 14);
-        AutoSize = true;
-        AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        MinimumSize = new Size(width, 0);
-        MaximumSize = new Size(width, 0);
-        _body = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Dock = DockStyle.Fill, BackColor = Ui.Surface };
-        _body.Controls.Add(Ui.Text(heading, Ui.Heading));
-        Controls.Add(_body);
-    }
-
-    public Card Add(params Control[] c) { _body.Controls.AddRange(c); return this; }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        base.OnPaint(e);
-        using var pen = new Pen(Ui.Line);
-        e.Graphics.DrawRectangle(pen, 0, 0, Width - 1, Height - 1);
-    }
-}
 
 /// <summary>The status window: state, today's receipts, the last problem with what to do, pairing and help.</summary>
 sealed class MainForm : Form
@@ -176,9 +54,11 @@ sealed class MainForm : Form
     // Header and banners
     readonly Label _headline = Ui.Text("", Ui.Heading);
     readonly Label _subline = Ui.Text("", Ui.Body, Ui.Muted);
-    readonly Panel _confirmBanner = new() { Dock = DockStyle.Top, Height = 60, BackColor = Ui.WarningBg, Visible = false, Padding = new Padding(16, 8, 16, 8) };
-    readonly Panel _updateBanner = new() { Dock = DockStyle.Top, Height = 52, BackColor = Ui.SuccessBg, Visible = false, Padding = new Padding(16, 6, 16, 6) };
+    readonly Panel _confirmBanner = new() { Dock = DockStyle.Top, Height = Ui.Px(60), BackColor = Ui.WarningBg, Visible = false, Padding = new Padding(16, 8, 16, 8) };
+    readonly Panel _updateBanner = new() { Dock = DockStyle.Top, Height = Ui.Px(52), BackColor = Ui.SuccessBg, Visible = false, Padding = new Padding(16, 6, 16, 6) };
     readonly Label _updateText = Ui.Text("", Ui.Strong, Ui.Success);
+    readonly Pill _pill = new();
+    Action? _fit; // receipts columns to the list width
 
     // Status tab
     // WO-89: one or more receipt printers (each Windows queue: USB, COM or a network printer's TCP/IP port).
@@ -230,7 +110,7 @@ sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         Icon = AppIcon.Value;
 
-        var tabs = new TabControl { Dock = DockStyle.Fill, RightToLeftLayout = true, Font = Ui.Body, Padding = new Point(16, 6) };
+        var tabs = new FlatTabs { Dock = DockStyle.Fill, RightToLeftLayout = true, Font = Ui.Body };
         tabs.TabPages.Add(StatusTab());
         tabs.TabPages.Add(ReceiptsTab());
         tabs.TabPages.Add(PairTab());
@@ -239,6 +119,7 @@ sealed class MainForm : Form
         tabs.TabPages.Add(HelpTab());
 
         Controls.Add(tabs);
+        Controls.Add(Nav(tabs));
         Controls.Add(BuildBanners());
         Controls.Add(Header());
 
@@ -288,21 +169,61 @@ sealed class MainForm : Form
 
     Control Header()
     {
-        var p = new Panel { Dock = DockStyle.Top, Height = 84, BackColor = Ui.Surface, Padding = new Padding(20, 10, 20, 8) };
-        var stack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill, BackColor = Ui.Surface };
+        var p = new Panel { Dock = DockStyle.Top, Height = Ui.Px(112), BackColor = Ui.Surface, Padding = new Padding(24, 14, 24, 12) };
+        var grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, BackColor = Ui.Surface };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 60));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var logo = new PictureBox { Size = new Size(44, 44), SizeMode = PictureBoxSizeMode.Zoom, Margin = new Padding(4, 6, 4, 4), BackColor = Ui.Surface };
+        try { logo.Image = new Icon(AppIcon.Value, 48, 48).ToBitmap(); } catch { }
+        var stack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill, BackColor = Ui.Surface, Margin = Padding.Empty };
         var title = Ui.Text("دايماً ديسك", Ui.Title);
         title.Margin = new Padding(4, 0, 4, 0);
-        _headline.Margin = new Padding(4, 2, 4, 0);
+        _subline.Font = Ui.Strong;
+        _subline.ForeColor = Ui.Ink2;
         _subline.Margin = new Padding(4, 0, 4, 0);
+        _headline.Font = Ui.Body;
+        _headline.Margin = new Padding(4, 2, 4, 0);
         stack.Controls.Add(title);
+        stack.Controls.Add(_subline);
         stack.Controls.Add(_headline);
-        p.Controls.Add(stack);
+        var end = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, BackColor = Ui.Surface, Margin = new Padding(0, 4, 0, 0) };
         var version = Ui.Text("الإصدار " + Runtime.Version, Ui.Body, Ui.Muted);
-        version.Dock = DockStyle.Left;
-        version.RightToLeft = RightToLeft.Yes;
-        p.Controls.Add(version);
+        end.Controls.Add(_pill);
+        end.Controls.Add(version);
+        grid.Controls.Add(logo, 0, 0);
+        grid.Controls.Add(stack, 1, 0);
+        grid.Controls.Add(end, 2, 0);
+        p.Controls.Add(grid);
         p.Paint += (_, e) => { using var pen = new Pen(Ui.Line); e.Graphics.DrawLine(pen, 0, p.Height - 1, p.Width, p.Height - 1); };
         return p;
+    }
+
+    /// <summary>The pill nav over the borderless tabs (Ctrl+Tab inside a page still switches them).</summary>
+    static Control Nav(TabControl tabs)
+    {
+        var bar = new FlowLayoutPanel { Dock = DockStyle.Top, Height = Ui.Px(64), BackColor = Ui.Canvas, Padding = new Padding(20, 12, 20, 4), WrapContents = false };
+        var buttons = new List<RoundButton>();
+        void Paint()
+        {
+            for (int i = 0; i < buttons.Count; i++)
+            {
+                if (i == tabs.SelectedIndex) buttons[i].SetColors(Ui.AccentSoft, Ui.AccentSoft, Ui.Accent, Color.Empty);
+                else buttons[i].SetColors(Ui.Canvas, Ui.Surface2, Ui.Ink2, Color.Empty);
+                buttons[i].Font = i == tabs.SelectedIndex ? Ui.Strong : Ui.Body;
+            }
+        }
+        for (int i = 0; i < tabs.TabCount; i++)
+        {
+            int index = i;
+            var b = new RoundButton(tabs.TabPages[i].Text, Ui.Canvas, Ui.Surface2, Ui.Ink2, Color.Empty) { MinimumSize = new Size(96, 40) };
+            b.Click += (_, _) => tabs.SelectedIndex = index;
+            buttons.Add(b);
+            bar.Controls.Add(b);
+        }
+        tabs.SelectedIndexChanged += (_, _) => Paint();
+        Paint();
+        return bar;
     }
 
     Control BuildBanners()
@@ -334,7 +255,7 @@ sealed class MainForm : Form
 
     static TabPage Page(string title, out FlowLayoutPanel stack)
     {
-        var page = new TabPage(title) { BackColor = Ui.Canvas, Padding = new Padding(16) };
+        var page = new TabPage(title) { BackColor = Ui.Canvas, Padding = new Padding(20, 8, 20, 8) };
         stack = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, Dock = DockStyle.Fill, AutoScroll = true, BackColor = Ui.Canvas };
         page.Controls.Add(stack);
         return page;
@@ -401,14 +322,49 @@ sealed class MainForm : Form
 
     TabPage ReceiptsTab()
     {
-        var page = new TabPage("الفواتير") { BackColor = Ui.Canvas, Padding = new Padding(16) };
+        var page = new TabPage("الفواتير") { BackColor = Ui.Canvas, Padding = new Padding(20, 8, 20, 8) };
         foreach (var (h, w) in new[] { ("الوقت", 90), ("النوع", 80), ("رقم الفاتورة", 140), ("المجموع", 100), ("الثقة", 70), ("الحالة", 360) })
             _list.Columns.Add(h, w);
-        var listHost = new Panel { Dock = DockStyle.Fill, BackColor = Ui.Surface, Padding = new Padding(1) };
+        // Clean rows: taller (an empty image list sets the row height), no grid lines, columns that fill the width
+        // (status widest, no horizontal scroll), and a painted header in muted text without separators.
+        _list.SmallImageList = new ImageList { ImageSize = new Size(1, Ui.Px(34)) };
+        _list.HeaderStyle = ColumnHeaderStyle.None;
+        int[] weights = { 90, 80, 140, 100, 70, 360 };
+        var header = new Panel { Dock = DockStyle.Top, Height = Ui.Px(36), BackColor = Ui.Surface };
+        _fit = Fit;
+        void Fit()
+        {
+            int w = _list.ClientSize.Width, total = weights.Sum(), used = 0;
+            if (w <= 0) return;
+            for (int i = 0; i < weights.Length; i++)
+            {
+                int cw = i == weights.Length - 1 ? w - used : w * weights[i] / total;
+                _list.Columns[i].Width = cw;
+                used += cw;
+            }
+            header.Invalidate();
+        }
+        _list.Resize += (_, _) => Fit();
+        header.Paint += (_, e) =>
+        {
+            int x = header.Width; // the first column is at the right (RTL)
+            foreach (ColumnHeader c in _list.Columns)
+            {
+                var r = new Rectangle(x - c.Width + 4, 0, c.Width - 10, header.Height - 1);
+                TextRenderer.DrawText(e.Graphics, c.Text, Ui.Strong, r, Ui.Muted,
+                    TextFormatFlags.RightToLeft | TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+                x -= c.Width;
+            }
+            using var pen = new Pen(Ui.Line);
+            e.Graphics.DrawLine(pen, 0, header.Height - 1, header.Width, header.Height - 1);
+        };
+        var listHost = new Card("آخر الفواتير", 0) { Dock = DockStyle.Fill, AutoSize = false, MinimumSize = Size.Empty, MaximumSize = Size.Empty };
+        listHost.Controls.Clear();
         listHost.Controls.Add(_list);
-        var export = new LinkLabel { Text = "تصدير العينات إلى سطح المكتب", AutoSize = true, LinkColor = Ui.Ink, Margin = new Padding(4, 8, 4, 4) };
+        listHost.Controls.Add(header);
+        var export = new LinkLabel { Text = "تصدير العينات إلى سطح المكتب", AutoSize = true, LinkColor = Ui.Accent, ActiveLinkColor = Ui.Accent, Margin = new Padding(4, 8, 4, 4) };
         export.LinkClicked += (_, _) => ExportSamples();
-        var logs = new LinkLabel { Text = "فتح السجل", AutoSize = true, LinkColor = Ui.Ink, Margin = new Padding(16, 8, 4, 4) };
+        var logs = new LinkLabel { Text = "فتح السجل", AutoSize = true, LinkColor = Ui.Accent, ActiveLinkColor = Ui.Accent, Margin = new Padding(16, 8, 4, 4) };
         // WO-91: Notepad from this (elevated) program opens the log in the locked data folder without an Explorer prompt.
         logs.LinkClicked += (_, _) => { try { Process.Start("notepad.exe", "\"" + _rt.Log.CurrentPath + "\""); } catch { } };
         var bottom = Ui.Row(Ui.Text("آخر 100 فاتورة منذ تشغيل البرنامج.", Ui.Body, Ui.Muted), export, logs);
@@ -573,6 +529,8 @@ sealed class MainForm : Form
             : $"عنوان هذا الجهاز: {ipText}";
         _netIp.ForeColor = netOn ? Ui.Success : Ui.Ink;
 
+        SetPill(on, c.Paired, !string.IsNullOrEmpty(c.LastProblem));
+        _subline.Text = c.Paired ? c.ShopName ?? "" : "غير مربوط";
         _info["المحل"].Text = c.Paired ? c.ShopName ?? "-" : "غير مربوط";
         _info["اسم الجهاز"].Text = c.Paired ? c.DeviceName ?? "-" : "-";
         var names = new List<string>();
@@ -645,6 +603,13 @@ sealed class MainForm : Form
         return at.Date == DateTimeOffset.Now.Date ? time : "يوم " + at.ToString("dd.MM", CultureInfo.InvariantCulture) + " " + time;
     }
 
+    void SetPill(bool on, bool paired, bool problem)
+    {
+        if (problem) _pill.Set("مشكلة", Ui.Danger, Ui.DangerBg);
+        else if (on && paired) _pill.Set("متصل", Ui.Success, Ui.SuccessBg);
+        else _pill.Set("غير متصل", Ui.Warning, Ui.WarningBg);
+    }
+
     void SetHeadline(string text, Color color)
     {
         _headline.Text = text;
@@ -664,6 +629,7 @@ sealed class MainForm : Form
         if (!r.Registered && r.Status.Contains("بلا QR")) item.ForeColor = Ui.Muted;
         _list.Items.Insert(0, item);
         while (_list.Items.Count > 100) _list.Items.RemoveAt(_list.Items.Count - 1);
+        _fit?.Invoke(); // the vertical scrollbar may have just appeared
     }
 
     // ---------- actions ----------
