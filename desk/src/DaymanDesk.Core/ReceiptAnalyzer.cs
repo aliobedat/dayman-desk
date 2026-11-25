@@ -46,7 +46,11 @@ public static class ReceiptAnalyzer
         lock (InitLock)
         {
             if (_registered) return;
-            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            // WO-95: .NET Framework has every code page built in; on .NET (the Linux tests) register the provider,
+            // found by name because netstandard2.0 has no reference to it.
+            var provider = Type.GetType("System.Text.CodePagesEncodingProvider, System.Text.Encoding.CodePages")
+                ?.GetProperty("Instance")?.GetValue(null) as EncodingProvider;
+            if (provider != null) Encoding.RegisterProvider(provider);
             _registered = true;
         }
     }

@@ -59,7 +59,7 @@ public static class Problems
         TokenUnreadable => "تعذّرت قراءة بيانات الربط المحفوظة على هذا الجهاز. اربط الجهاز من جديد برمز من لوحة التحكم.",
         ListenerBusy => $"المنفذ {detail ?? "9100"} مستخدم من برنامج آخر، فتطبع الطابعة مباشرة بلا دايماً ديسك. أغلق البرنامج الآخر ثم اضغط «تشغيل دايماً ديسك».",
         PrinterUnreachable => $"تعذّر الوصول إلى طابعة الشبكة{(detail != null ? " " + detail : "")}، فطُبعت الفاتورة بلا QR (أو تنتظر عودة الطابعة كما كانت قبل دايماً ديسك). تأكد أن الطابعة تعمل ومتصلة بالشبكة.",
-        OcrUnavailable => "فواتير هذا المحل صور، وقراءة النص غير مثبّتة في Windows، فتُطبع بلا QR. اترك الجهاز متصلاً بالإنترنت وأعد تشغيله، فيثبّتها البرنامج تلقائياً.",
+        OcrUnavailable => "فواتير هذا المحل صور، وقراءة النص من الصورة لا تعمل على هذا الجهاز، فتُطبع بلا QR. أعد تشغيل الجهاز، وإن تكرر ذلك فتواصل مع دعم دايماً.",
         ImageUnreadable => "لم يقرأ البرنامج رقم الفاتورة أو المجموع من صورة الفاتورة، فطُبعت بلا QR. إن تكرر ذلك فاضغط «إعادة تأكيد الحقول» في تبويب «الربط».",
         RestoreFailed => "لم نتأكد من إرجاع الطابعة إلى منفذها الأصلي. إن لم تطبع الفواتير فافتح خصائص الطابعة ← Ports واختر منفذها الأصلي.",
         UpdateInstallFailed => (detail ?? "تعذّر تثبيت الإصدار الجديد.") + " يعمل الإصدار المثبّت السابق كما كان.",
@@ -378,13 +378,17 @@ public sealed class DeskAgent
         // The server's amount bounds (lib/desk.ts: DELIVERY_MIN_FILS to PURCHASE_MAX_FILS): outside them no pool code
         // is printed; /receipt answers 422 and the receipt gets no QR, as before.
         bool inRange = ext.Total.Value >= MinAmount && ext.Total.Value <= MaxAmount;
-        string? poolCode = cfg.QrEnabled && inRange ? TakeCode(invoiceKey) : null;
+        // WO-95: a device whose key the server holds signs the QR itself (contract v1.3); only without one (no key yet,
+        // an older server) does it take a pool code as in 1.2.
+        string? signedToken = cfg.QrEnabled && inRange ? TakeSigned(invoiceKey, ext.InvoiceNo, ext.Total.Value) : null;
+        string? poolCode = signedToken == null && cfg.QrEnabled && inRange ? TakeCode(invoiceKey) : null;
         var req = new ReceiptRequest(
             Guid.NewGuid().ToString(), ext.InvoiceNo, ext.Total.Value.ToString("0.000", CultureInfo.InvariantCulture),
-            _now().ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture), KindWire(analysis.Kind), poolCode);
-        if (poolCode != null)
+            _now().ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture), KindWire(analysis.Kind), poolCode,
+            signedToken == null ? null : DeskSigner.SeqOf(signedToken));
+        if (signedToken != null || poolCode != null)
         {
-            await PrePrintedAsync(req, seq, rec, invoiceKey, analysis, ext, image).ConfigureAwait(false);
+            await PrePrintedAsync(req, seq, rec, invoiceKey, analysis, ext, image, signedToken).ConfigureAwait(false);
             return;
         }
         var started = _now();
@@ -500,6 +504,108 @@ public sealed class DeskAgent
         return code;
     }
 
+    /// <summary>
+    /// WO-95: the signed QR token for this invoice today: the one already printed for it, else a new one with the next
+    /// seq (recorded for a reprint). Null: no registered key, no claim base, refused before, or a pool code was printed.
+    /// </summary>
+    string? TakeSigned(string key, string invoiceNo, decimal total)
+    {
+        string? token = null;
+        var signer = Signer();
+        string inv = DeskSigner.NormalizeInvoice(invoiceNo);
+        long fils = (long)Math.Round(total * 1000m, MidpointRounding.AwayFromZero);
+        string cutoff = _now().AddDays(-8).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        _cfg.Update(c =>
+        {
+            foreach (var old in c.PrintedCodes.Keys.Where(k => string.CompareOrdinal(k, cutoff) < 0).ToList()) c.PrintedCodes.Remove(old);
+            if (c.PrintedCodes.TryGetValue(key, out var had))
+            {
+                if (had.StartsWith("r:", StringComparison.Ordinal)) token = had.Substring(2);
+                return;
+            }
+            if (signer == null || !c.KeyRegistered || c.DeviceNumber is not int num || num < 1 || num > 32767
+                || !ValidClaimBase(c.ClaimBase) || inv.Length == 0 || inv.Length > 40 || c.NextSeq < 0 || c.NextSeq > uint.MaxValue) return;
+            uint s = (uint)c.NextSeq;
+            c.NextSeq++;
+            token = DeskSigner.Token(DeskSigner.Payload(num, s, fils, DeskSigner.Day(_now()), inv), signer);
+            c.PrintedCodes[key] = "r:" + token;
+        });
+        return token;
+    }
+
+    System.Security.Cryptography.ECDsa? _signKey;
+    string? _signKeyFor;
+
+    /// <summary>The signing key opened from its DPAPI seal (cached per sealed value), or null.</summary>
+    System.Security.Cryptography.ECDsa? Signer()
+    {
+        var sealedKey = _cfg.Current.SignKeyProtected;
+        if (sealedKey == null) return null;
+        lock (_lock)
+        {
+            if (_signKeyFor == sealedKey) return _signKey;
+            _signKey?.Dispose();
+            _signKey = null;
+            _signKeyFor = sealedKey;
+            try
+            {
+                var plain = OpenKey(sealedKey);
+                if (plain != null) _signKey = DeskSigner.Open(plain);
+                else _log.Warn("signing key could not be opened (DPAPI): pool codes only");
+            }
+            catch (Exception ex) { _log.Warn("signing key unusable: " + ex.GetType().Name); }
+            return _signKey;
+        }
+    }
+
+    string? OpenKey(string sealedKey) => _cfg.Protector == null ? sealedKey : _cfg.Protector.Unprotect(sealedKey);
+    string SealKey(string plain) => _cfg.Protector == null ? plain : _cfg.Protector.Protect(plain);
+
+    /// <summary>A new key pair, sealed. Null when this PC cannot make or seal one (the program then uses pool codes).</summary>
+    (string Sealed, string Spki)? NewKey()
+    {
+        try
+        {
+            var (priv, spki) = DeskSigner.CreateKey();
+            return (SealKey(priv), spki);
+        }
+        catch (Exception ex) { _log.Warn("signing key not created: " + ex.GetType().Name); return null; }
+    }
+
+    bool _keyRefused;
+
+    /// <summary>
+    /// WO-95: a device paired without a key (1.x, or an older server) makes one and registers it (POST /key), which
+    /// also answers its device number. KEY_SET: the server holds another key; signed QR waits for a new pairing.
+    /// </summary>
+    public async Task EnsureKeyAsync()
+    {
+        var cfg = _cfg.Current;
+        if (!cfg.Paired || cfg.KeyRegistered || _keyRefused) return;
+        string token = cfg.DeviceToken!;
+        if (cfg.SignKeyProtected == null)
+        {
+            var k = NewKey();
+            if (k == null) return;
+            _cfg.Update(c => { if (c.DeviceToken == token && c.SignKeyProtected == null) c.SignKeyProtected = k.Value.Sealed; });
+        }
+        var sealedKey = _cfg.Current.SignKeyProtected;
+        string? plain = sealedKey == null ? null : OpenKey(sealedKey);
+        if (plain == null) return;
+        var res = await _api.KeyAsync(token, new KeyRequest(DeskSigner.SpkiOf(plain))).ConfigureAwait(false);
+        if (res.Ok && res.Value != null)
+        {
+            _cfg.Update(c => { if (c.DeviceToken == token) { c.DeviceNumber = res.Value.DeviceNumber; c.KeyRegistered = true; } });
+            _log.Info("signing key registered");
+        }
+        else if (res.Unauthorized) Unpair(res.Error);
+        else
+        {
+            if (res.Status == 409) _keyRefused = true;
+            _log.Warn($"key: {res}"); // a server before v1.3 has no /key: pool codes as before
+        }
+    }
+
     void Remember(string key, string code)
     {
         try { _cfg.Update(c => c.PrintedCodes[key] = code); }
@@ -508,25 +614,26 @@ public sealed class DeskAgent
 
     /// <summary>The slip with a pool code printed at once; then the binding (/receipt with code), queued when offline.</summary>
     async Task PrePrintedAsync(ReceiptRequest req, long seq, ReceiptRecord rec, string invoiceKey, AnalysisResult analysis,
-        ExtractResult ext, ImageRead image)
+        ExtractResult ext, ImageRead image, string? signedToken = null)
     {
         var c = _cfg.Current;
         byte[]? slip = null;
-        try { slip = QrReceipt.Build(c.ClaimBase + req.Code, c.CodePage, c.CodeTable, req.InvoiceNo, req.Amount); }
+        string url = signedToken != null ? DeskSigner.Url(c.ClaimBase!, signedToken) : c.ClaimBase + req.Code;
+        try { slip = QrReceipt.Build(url, c.CodePage, c.CodeTable, req.InvoiceNo, req.Amount); }
         catch (ArgumentException) { _log.Error("pool slip not printable"); }
         rec.QrPrinted = slip != null && _printIfCurrent(seq, slip);
         if (rec.QrPrinted) ClearProblem(Problems.QrPrintFailed);
         else _log.Warn("pool qr skipped: another job was forwarded or the slip did not print");
 
         var res = await _api.ReceiptAsync(c.DeviceToken!, req).ConfigureAwait(false);
-        _log.Info($"receipt (pool) -> {res}");
+        _log.Info($"receipt ({(signedToken != null ? "signed" : "pool")}) -> {res}");
         string printed = rec.QrPrinted ? "QR مطبوع" : "QR لم يُطبع (طُبعت فاتورة بعدها)";
         if (res.Ok && res.Value != null)
         {
             rec.Registered = true;
             ClearProblem(Problems.Offline, Problems.RateLimited, Problems.ParseFailed, Problems.Rejected, Problems.OutOfRange,
                 Problems.ImageUnreadable, Problems.PrinterUnreachable);
-            if (res.Value.Code != req.Code)
+            if (req.Code != null && res.Value.Code != req.Code)
             {
                 // Accepted edge case: another till registered this invoice first. Its code stands, this slip's is void.
                 if (ValidCode(res.Value.Code)) Remember(invoiceKey, res.Value.Code);
@@ -611,7 +718,7 @@ public sealed class DeskAgent
         }
         catch (Exception ex) { _log.Warn("unknown format not saved: " + ex.GetType().Name); }
         if (!first) return;
-        string head = Convert.ToHexString(job, 0, Math.Min(job.Length, 8));
+        string head = BitConverter.ToString(job, 0, Math.Min(job.Length, 8)).Replace("-", "");
         await ReportAsync("warn", "unknown_format", $"format {format}: {reason}, first bytes {head}", job, force: true).ConfigureAwait(false);
     }
 
@@ -754,7 +861,12 @@ public sealed class DeskAgent
     {
         _log.Error("device token refused (" + why + "): unpaired");
         // WO-90: a revoked device's pool is void on the server; a new pairing starts a new one.
-        _cfg.Update(c => { c.DeviceToken = null; c.CodePool.Clear(); c.ClaimBase = null; c.PrintedCodes.Clear(); });
+        _cfg.Update(c =>
+        {
+            c.DeviceToken = null; c.CodePool.Clear(); c.ClaimBase = null; c.PrintedCodes.Clear();
+            // WO-95: a key belongs to one pairing (a new pairing sends a new one).
+            c.SignKeyProtected = null; c.DeviceNumber = null; c.KeyRegistered = false;
+        });
         SetProblem(Problems.Revoked);
     }
 
@@ -833,6 +945,7 @@ public sealed class DeskAgent
             ClearProblem(Problems.Offline, Problems.RateLimited);
             if (newer) UpdateAvailable?.Invoke(v.LatestVersion!.Trim(), v.DownloadUrl!);
             await FlushQueueAsync().ConfigureAwait(false);
+            await EnsureKeyAsync().ConfigureAwait(false);
             await RefillPoolAsync().ConfigureAwait(false);
         }
         else if (res.Unauthorized) Unpair(res.Error);
@@ -885,7 +998,8 @@ public sealed class DeskAgent
 
     public async Task<ApiResult<PairResponse>> PairAsync(string code, string deviceName)
     {
-        var res = await _api.PairAsync(new PairRequest(code.Trim().ToUpperInvariant(), deviceName, _version)).ConfigureAwait(false);
+        var key = NewKey(); // WO-95: one key per pairing, sent with it (v1.3)
+        var res = await _api.PairAsync(new PairRequest(code.Trim().ToUpperInvariant(), deviceName, _version, key?.Spki)).ConfigureAwait(false);
         if (res.Ok && res.Value != null && !string.IsNullOrEmpty(res.Value.Token))
         {
             var v = res.Value;
@@ -896,11 +1010,14 @@ public sealed class DeskAgent
                 c.SamplesSent = 0;
                 // WO-90: the old pool belongs to the old device (the server refuses it for this one).
                 c.CodePool.Clear(); c.ClaimBase = null; c.PrintedCodes.Clear();
+                c.SignKeyProtected = key?.Sealed; c.DeviceNumber = v.DeviceNumber;
+                c.KeyRegistered = key != null && v.DeviceNumber != null; // an older server ignored the key: /key later
                 // A new pairing asks again on the first receipt (it may be another shop or another POS).
                 c.FieldsConfirmed = false; c.LearnedInvoice = null; c.LearnedTotal = null;
                 if (c.LastProblem is Problems.Revoked or Problems.TokenUnreadable) { c.LastProblem = null; c.LastProblemDetail = null; c.LastProblemAt = null; }
             });
             lock (_lock) _pending = null;
+            _keyRefused = false;
             _log.Info("paired with shop");
         }
         else _log.Warn($"pair failed: {res}");

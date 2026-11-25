@@ -2,3 +2,6 @@ bin/
 obj/
 publish/
 *.user
+src/DaymanDesk.App/tessdata/
+FodyWeavers.xsd
+src/DaymanDesk.App/vcrt/

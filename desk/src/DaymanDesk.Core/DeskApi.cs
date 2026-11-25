@@ -7,11 +7,18 @@ using System.Text.Json.Serialization;
 namespace DaymanDesk.Core;
 
 // Shapes of docs/desk-api.md (v1.2). Property names serialize camelCase.
-public sealed record PairRequest(string Code, string DeviceName, string AppVersion);
-public sealed record PairResponse(string Token, string ShopName, string StampMode, int CodeValidityDays, bool QrEnabled);
+// v1.3 (WO-95): pairing sends the signing key and answers the device number.
+public sealed record PairRequest(string Code, string DeviceName, string AppVersion,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? PublicKey = null);
+public sealed record PairResponse(string Token, string ShopName, string StampMode, int CodeValidityDays, bool QrEnabled,
+    int? DeviceNumber = null);
+/// <summary>v1.3: the signing key of a device paired without one (POST /key).</summary>
+public sealed record KeyRequest(string PublicKey);
+public sealed record KeyResponse(int DeviceNumber);
 /// <summary>v1.2: <paramref name="Code"/> is the pool code already printed on the slip (omitted when none).</summary>
 public sealed record ReceiptRequest(string ClientId, string InvoiceNo, string Amount, string PrintedAt, string Kind,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Code = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Code = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Seq = null);
 public sealed record ReceiptResponse(string Code, string ClaimUrl, string ExpiresAt, bool Already);
 /// <summary>v1.2 (WO-90): a refill of the device's pool of pre-issued codes.</summary>
 public sealed record CodesRequest(int Count);
@@ -68,6 +75,9 @@ public sealed class DeskApiClient
 
     public Task<ApiResult<CodesResponse>> CodesAsync(string token, CodesRequest req, CancellationToken ct = default) =>
         PostAsync<CodesResponse>("/codes", req, token, ct);
+
+    public Task<ApiResult<KeyResponse>> KeyAsync(string token, KeyRequest req, CancellationToken ct = default) =>
+        PostAsync<KeyResponse>("/key", req, token, ct);
 
     public Task<ApiResult<object>> ReportAsync(string token, ReportRequest req, CancellationToken ct = default) =>
         PostAsync<object>("/report", req, token, ct);

@@ -3,25 +3,46 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <ApplicationIcon>dayman.ico</ApplicationIcon>
-    <!-- WO-89: the Windows SDK projection for Windows.Media.Ocr (built into Windows 10/11, no NuGet package). -->
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
-    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <!-- WO-95: .NET Framework 4.8 (Windows 7 SP1 to 11). OCR is Tesseract (bundled), no Windows SDK. -->
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>latest</LangVersion>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DaymanDesk</AssemblyName>
     <RootNamespace>DaymanDesk.App</RootNamespace>
-    <Version>1.2.2</Version>
+    <Version>2.0.0</Version>
     <Product>دايماً ديسك</Product>
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
-    <!-- Uncompressed single file: the watchdog starts every minute, so no decompression on each start. -->
-    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <GenerateBindingRedirectsOutputType>true</GenerateBindingRedirectsOutputType>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\DaymanDesk.Core\DaymanDesk.Core.csproj" />
+    <Compile Include="..\DaymanDesk.Core\Polyfills.cs" Link="Polyfills.cs" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="Tesseract" Version="5.2.0" GeneratePathProperty="true" />
+    <!-- One exe: Costura embeds the managed dependencies; the native OCR files and tessdata are embedded below and
+         extracted by TesseractOcr on first use. -->
+    <PackageReference Include="Costura.Fody" Version="5.7.0" PrivateAssets="all" />
+    <PackageReference Include="Fody" Version="6.8.0" PrivateAssets="all" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.IO.Compression" />
+    <Reference Include="System.IO.Compression.FileSystem" />
+    <Reference Include="System.Security" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="$(PkgTesseract)\x64\*.dll" LogicalName="ocr/x64/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="$(PkgTesseract)\x86\*.dll" LogicalName="ocr/x86/%(Filename)%(Extension)" />
+    <!-- WO-95b: the VC++ 2015-2022 runtime and the UCRT, app-local; copied by CI (desk.yml) from the runner, not in git. -->
+    <EmbeddedResource Include="vcrt\x64\*.dll" LogicalName="ocr/x64/%(Filename)%(Extension)" />
+    <EmbeddedResource Include="vcrt\x86\*.dll" LogicalName="ocr/x86/%(Filename)%(Extension)" />
+    <!-- tessdata_fast eng + ara, downloaded by CI (desk.yml) into tessdata/ (not in git). -->
+    <EmbeddedResource Include="tessdata\*.traineddata" LogicalName="ocr/tessdata/%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

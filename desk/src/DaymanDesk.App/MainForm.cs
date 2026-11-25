@@ -126,10 +126,10 @@ sealed class LatinTextBox : TextBox
         if (t != want)
         {
             // Typed or pasted text: one mark at the start, the caret stays after what was typed.
-            int caret = Math.Clamp(SelectionStart, 0, t.Length);
+            int caret = Math.Max(0, Math.Min(SelectionStart, t.Length));
             int marksBefore = t[..caret].Count(ch => ch == Ui.Nods);
             base.Text = want; // raises TextChanged again, with the final text
-            SelectionStart = Math.Clamp(caret - marksBefore + 1, 0, want.Length);
+            SelectionStart = Math.Max(0, Math.Min(caret - marksBefore + 1, want.Length));
             return;
         }
         base.OnTextChanged(e);
@@ -745,7 +745,7 @@ sealed class MainForm : Form
         try
         {
             var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
-                $"dayman-samples-{DateTime.Now:yyyyMMdd-HHmm}.zip");
+                "dayman-samples-" + DateTime.Now.ToString("yyyyMMdd-HHmm", System.Globalization.CultureInfo.InvariantCulture) + ".zip");
             _rt.Samples.ExportZip(path);
             Msg("حُفظت العينات على سطح المكتب:\n" + path + "\n\nأرسلها إلى دعم دايماً فقط، فقد تحوي بيانات زبائن.", MessageBoxIcon.Information);
         }

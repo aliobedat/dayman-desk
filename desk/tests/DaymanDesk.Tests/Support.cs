@@ -126,13 +126,13 @@ public sealed class FakeShell : IShell
         Scripts.Add(script);
         var o = Override(script);
         if (o != null) return o;
-        if (script.StartsWith("ConvertTo-Json"))
-            return new ShellResult(0, "[{\"Name\":\"POS-80\",\"PortName\":\"" + Port + "\",\"DriverName\":\"POS-80 Driver\"},{\"Name\":\"Microsoft Print to PDF\",\"PortName\":\"PORTPROMPT:\",\"DriverName\":\"x\"}]", "");
-        if (script.StartsWith("(Get-Printer")) return new ShellResult(0, Port, "");
-        if (script.StartsWith("Set-Printer"))
+        if (script == PrinterSetup.ListScript)
+            return new ShellResult(0, "POS-80\t" + Port + "\tPOS-80 Driver\t\t0\t0\nMicrosoft Print to PDF\tPORTPROMPT:\tx\t\t0\t0", "");
+        if (script.EndsWith("$p[0].PortName")) return new ShellResult(0, Port, "");
+        if (script.EndsWith("[void]$p[0].Put()"))
         {
-            var i = script.LastIndexOf("-PortName '", StringComparison.Ordinal);
-            Port = script[(i + 11)..^1];
+            var i = script.LastIndexOf("$p[0].PortName = '", StringComparison.Ordinal);
+            Port = script.Substring(i + 18, script.Length - (i + 18) - "'; [void]$p[0].Put()".Length);
         }
         return new ShellResult(0, "", "");
     }

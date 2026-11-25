@@ -9,8 +9,22 @@ static class Program
     [STAThread]
     static int Main(string[] args)
     {
+        // WO-95b: on an older .NET Framework 4.x the exe would start and fail later; say what is missing instead.
+        if (!HasNet48())
+        {
+            if (!args.Contains("--watchdog") && !args.Contains("--tray"))
+                MessageBox.Show("يحتاج دايماً ديسك إلى ‎.NET Framework 4.8. ثبّته من موقع Microsoft، ثم شغّل البرنامج مرة أخرى.", "دايماً ديسك",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1,
+                    MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
+            return 2;
+        }
         ReceiptAnalyzer.EnsureCodePages();
         if (args.Contains("--watchdog")) return RunWatchdog();
+        // CI only (WO-95): reads a receipt picture with the bundled OCR, as an image receipt is read.
+        int selftest = Array.IndexOf(args, "--ocr-selftest");
+        if (selftest >= 0 && selftest + 1 < args.Length) return OcrSelfTest(args[selftest + 1]);
+        int signtest = Array.IndexOf(args, "--sign-selftest");
+        if (signtest >= 0 && signtest + 1 < args.Length) return SignSelfTest(args[signtest + 1]);
 
         using var single = new Mutex(true, @"Global\DaymanDesk.App", out bool first);
         if (!first)
@@ -22,7 +36,10 @@ static class Program
             return 0;
         }
 
-        ApplicationConfiguration.Initialize();
+        // WO-95: .NET Framework 4.8 on Windows 7 does not offer TLS 1.2 by default; the server accepts nothing older.
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
         using var rt = new Runtime();
         // CI only: renders every tab and the «تأكيد الحقول» dialog to PNG files (no printer, no network, no Start).
         int shots = Array.IndexOf(args, "--screenshots");
@@ -43,6 +60,92 @@ static class Program
         rt.Start();
         Application.Run(new MainForm(rt, startHidden: args.Contains("--tray")));
         return 0;
+    }
+
+    /// <summary>
+    /// Reads the PNG twice (as printed and upscaled, as DeskAgent does) and writes the result to &lt;png&gt;.txt. Exit 0
+    /// only when both reads give the same invoice number and total.
+    /// </summary>
+    static int OcrSelfTest(string png)
+    {
+        var o = new System.Text.StringBuilder();
+        int code = 1;
+        try
+        {
+            MonoBitmap m;
+            using (var bmp = new System.Drawing.Bitmap(png))
+            {
+                m = new MonoBitmap(bmp.Width, bmp.Height);
+                for (int y = 0; y < bmp.Height; y++)
+                    for (int x = 0; x < bmp.Width; x++)
+                        m.Pixels[y * bmp.Width + x] = bmp.GetPixel(x, y).GetBrightness() < 0.5f ? (byte)1 : (byte)0;
+            }
+            var log = new RollingLog(Path.Combine(Path.GetTempPath(), "dayman-ocr-selftest"));
+            using var ocr = new TesseractOcr(log, Installer.LockDataDir(log));
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var first = ocr.ReadAsync(m).GetAwaiter().GetResult();
+            long t1 = sw.ElapsedMilliseconds;
+            var second = ocr.ReadAsync(m.Scale2x()).GetAwaiter().GetResult();
+            long t2 = sw.ElapsedMilliseconds - t1;
+            if (first == null || second == null) o.AppendLine("ocr unavailable (see the log in %TEMP%\\dayman-ocr-selftest)");
+            else
+            {
+                var a = ReceiptExtractor.Extract(OcrText.Clean(first), ocr: true);
+                var b = ReceiptExtractor.Extract(OcrText.Clean(second), ocr: true);
+                o.AppendLine("read 1 (" + t1 + " ms): " + string.Join(" | ", first));
+                o.AppendLine("read 2 (" + t2 + " ms): " + string.Join(" | ", second));
+                o.AppendLine($"invoice {a.InvoiceNo}/{b.InvoiceNo} total {a.Total}/{b.Total}");
+                if (a.InvoiceNo != null && a.Total != null && a.InvoiceNo == b.InvoiceNo && a.Total == b.Total) code = 0;
+            }
+        }
+        catch (Exception ex) { o.AppendLine("error: " + ex); }
+        File.WriteAllText(png + ".txt", o.ToString());
+        return code;
+    }
+
+    /// <summary>.NET Framework 4.8 or later (registry Release 528040+).</summary>
+    static bool HasNet48()
+    {
+        try
+        {
+            using var k = Microsoft.Win32.RegistryKey.OpenBaseKey(Microsoft.Win32.RegistryHive.LocalMachine, Microsoft.Win32.RegistryView.Registry64)
+                .OpenSubKey(@"SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full");
+            return k?.GetValue("Release") is int r && r >= 528040;
+        }
+        catch { return true; } // unreadable: try to run
+    }
+
+    /// <summary>
+    /// CI only (WO-95b): the signing path on .NET Framework: a new key sealed with DPAPI and opened again, a payload
+    /// signed, and the signature verified with the public key rebuilt from the SPKI. Result in &lt;out&gt;.
+    /// </summary>
+    static int SignSelfTest(string outFile)
+    {
+        string result; int code = 1;
+        try
+        {
+            var (priv, spki) = DeskSigner.CreateKey();
+            var dp = new DpapiProtector();
+            var opened = dp.Unprotect(dp.Protect(priv)) ?? throw new InvalidOperationException("DPAPI round trip");
+            var payload = DeskSigner.Payload(1, 42, 12_500, DeskSigner.Day(DateTimeOffset.Now), "10432");
+            using var key = DeskSigner.Open(opened);
+            var token = DeskSigner.Token(payload, key);
+            var sig = DeskSigner.FromB64Url(token.Split('.')[1]);
+            var der = Convert.FromBase64String(spki);
+            var q = new System.Security.Cryptography.ECParameters
+            {
+                Curve = System.Security.Cryptography.ECCurve.NamedCurves.nistP256,
+                Q = new System.Security.Cryptography.ECPoint { X = der.Skip(27).Take(32).ToArray(), Y = der.Skip(59).Take(32).ToArray() },
+            };
+            using var pub = System.Security.Cryptography.ECDsa.Create(q);
+            bool ok = der.Length == 91 && sig.Length == 64 && pub.VerifyData(payload, sig, System.Security.Cryptography.HashAlgorithmName.SHA256)
+                && DeskSigner.SeqOf(token) == 42;
+            result = $"{(ok ? "ok" : "FAILED")} {key.GetType().Name} sig {sig.Length} B, token {token.Length} chars";
+            if (ok) code = 0;
+        }
+        catch (Exception ex) { result = "error: " + ex; }
+        File.WriteAllText(outFile, result);
+        return code;
     }
 
     /// <summary>Run by the scheduled task every minute as SYSTEM. Cheap when all is well: one socket table read.</summary>

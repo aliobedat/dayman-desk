@@ -22,7 +22,7 @@ public sealed class SampleStore
     {
         lock (_lock)
         {
-            string name = at.ToString("yyyyMMdd-HHmmss-fff");
+            string name = at.ToString("yyyyMMdd-HHmmss-fff", System.Globalization.CultureInfo.InvariantCulture);
             string path = Path.Combine(_dir, name + ".bin");
             for (int n = 1; File.Exists(path); n++) path = Path.Combine(_dir, $"{name}-{n}.bin");
             File.WriteAllBytes(path, data);

@@ -81,16 +81,13 @@ public static class AnyPosTests
             Scripts.Add(s);
             var o = Override(s);
             if (o != null) return o;
-            if (s.StartsWith("ConvertTo-Json"))
-            {
-                var items = Ports.Select(p => p.Key == "Bar"
-                    ? new { Name = p.Key, PortName = p.Value, DriverName = "EPSON TM-T20", Host = "192.168.1.50", PortNumber = 9100, Protocol = 1 }
-                    : new { Name = p.Key, PortName = p.Value, DriverName = "POS Driver", Host = "", PortNumber = 0, Protocol = 0 });
-                return new ShellResult(0, JsonSerializer.Serialize(items), "");
-            }
-            var m = Regex.Match(s, @"^\(Get-Printer -Name '(.*)'\)\.PortName$");
+            if (s == PrinterSetup.ListScript)
+                return new ShellResult(0, string.Join("\n", Ports.Select(p => p.Key == "Bar"
+                    ? $"{p.Key}\t{p.Value}\tEPSON TM-T20\t192.168.1.50\t9100\t1"
+                    : $"{p.Key}\t{p.Value}\tPOS Driver\t\t0\t0")), "");
+            var m = Regex.Match(s, @"\$_\.Name -eq '(.*?)' \}\); if \(\$p\.Count -ne 1\) \{ throw 'printer not found' \}; \$p\[0\]\.PortName$");
             if (m.Success) return new ShellResult(0, Ports[m.Groups[1].Value], "");
-            m = Regex.Match(s, @"^Set-Printer -Name '(.*)' -PortName '(.*)'$");
+            m = Regex.Match(s, @"\$_\.Name -eq '(.*?)' \}\); if .*\$p\[0\]\.PortName = '(.*)'; \[void\]\$p\[0\]\.Put\(\)$");
             if (m.Success) Ports[m.Groups[1].Value] = m.Groups[2].Value;
             return new ShellResult(0, "", "");
         }
@@ -367,8 +364,8 @@ public static class AnyPosTests
         Assert.True(PassThroughServer.ValidateNetwork("192.168.1.50", 80, 9100, none, local) != null, "port range");
         var msg = PassThroughServer.ValidateNetwork("192.168.1.50", 9100, 9100, new List<PrinterRoute> { Win("POS-80", 9100) }, local);
         Assert.True(msg != null && msg.Contains("9101"), "port of a printer refused, a free one suggested: " + msg);
-        Assert.True(Firewall.AddScript(9100).Contains("-LocalPort 9100 -RemoteAddress LocalSubnet"), "firewall: this port, local subnet only");
-        Assert.True(Firewall.RemoveScript.Contains("Remove-NetFirewallRule"), "firewall removal");
+        Assert.True(Firewall.AddScript(9100).Contains("localport=9100 remoteip=localsubnet"), "firewall: this port, local subnet only");
+        Assert.True(Firewall.RemoveScript.Contains("delete rule name=DaymanDeskNetwork"), "firewall removal");
     }
 
     // ---------- 1. several printers: install, watchdog, uninstall ----------
@@ -391,8 +388,8 @@ public static class AnyPosTests
         Assert.Equal("192.168.1.50", bar.DirectHost, "TCP/IP printer forwarded directly");
         Assert.Equal(9100, bar.DirectPort, "its RAW port");
         Assert.Equal<string?>(null, c.Printers.Single(r => r.PrinterName == "POS-80").DirectHost, "USB printer via its raw queue");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Add-Printer -Name '" + DeskConfig.RawQueueFor("Bar") + "' -DriverName 'Generic / Text Only' -PortName 'IP_192.168.1.50'")), "Bar's spooler fallback on its real port");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Add-PrinterPort -Name 'DAYMAN_9101' -PrinterHostAddress '127.0.0.1' -PortNumber 9101")), "second tcp port");
+        Assert.True(sh.Scripts.Any(s => s == PrinterSetup.AddQueueScript(DeskConfig.RawQueueFor("Bar"), "IP_192.168.1.50")), "Bar's spooler fallback on its real port");
+        Assert.True(sh.Scripts.Any(s => s == PrinterSetup.AddTcpPortScript("DAYMAN_9101", 9101)), "second tcp port");
         Assert.Equal("POS-80", c.PrinterName, "v1.0 mirror is the 9100 printer");
 
         // The watchdog restores only the printer whose listener is gone.
@@ -411,21 +408,21 @@ public static class AnyPosTests
         setup.Uninstall(store);
         Assert.Equal("USB001", sh.Ports["POS-80"], "restored");
         Assert.Equal("IP_192.168.1.50", sh.Ports["Bar"], "restored");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Remove-Printer -Name '" + DeskConfig.RawQueueFor("POS-80") + "'")) && sh.Scripts.Any(s => s.Contains("Remove-Printer -Name '" + DeskConfig.RawQueueFor("Bar") + "'")), "raw queues removed");
-        Assert.True(!sh.Scripts.Any(s => s.Contains("NetFirewallRule")), "printers only: the firewall is not touched");
+        Assert.True(sh.Scripts.Contains(PrinterSetup.RemoveQueueScript(DeskConfig.RawQueueFor("POS-80"))) && sh.Scripts.Contains(PrinterSetup.RemoveQueueScript(DeskConfig.RawQueueFor("Bar"))), "raw queues removed");
+        Assert.True(!sh.Scripts.Any(s => s.Contains("advfirewall")), "printers only: the firewall is not touched");
         Assert.True(!store.Current.Active && store.Current.Network.Enabled, "off; network mode left to StopAndRestore");
     }
 
     public static void TestInstallRollbackLeavesNetworkMode()
     {
         var sh = new MultiShell();
-        sh.Override = s => s.StartsWith("Set-Printer -Name 'Bar' -PortName 'DAYMAN_") ? new ShellResult(1, "", "driver refuses") : null;
+        sh.Override = s => s.StartsWith(PrinterSetup.GetPortScript("Bar").Replace("$p[0].PortName", "")) && s.Contains("PortName = 'DAYMAN_") ? new ShellResult(1, "", "driver refuses") : null;
         var store = new ConfigStore(Path.Combine(Tmp.Dir(), "config.json"));
         store.Update(c => { c.Network.Enabled = true; c.Network.ListenPort = 9100; c.Network.PrinterHost = "192.168.1.60"; });
         try { new PrinterSetup(sh, null).Install(store, new[] { "POS-80", "Bar" }, _ => true); } catch (SetupException) { }
         Assert.Equal("USB001", sh.Ports["POS-80"], "printers rolled back");
         Assert.True(store.Current.Network.Enabled, "network mode still on");
-        Assert.True(!sh.Scripts.Any(s => s.Contains("NetFirewallRule")), "firewall rule kept");
+        Assert.True(!sh.Scripts.Any(s => s.Contains("advfirewall")), "firewall rule kept");
     }
 
     public static void TestWatchdogRestartsNetworkMode()
@@ -435,7 +432,7 @@ public static class AnyPosTests
         c.Network.Enabled = true; c.Network.PrinterHost = "192.168.1.60"; c.Network.ListenPort = 9100;
         Assert.True(Watchdog.NetworkDown(c, _ => false), "on and nothing listens");
         Assert.True(!Watchdog.NetworkDown(c, p => p == 9100), "listening");
-        Assert.Equal(@"Start-ScheduledTask -TaskPath '\DaymanDesk\' -TaskName 'Tray'", ScheduledTasks.StartTrayScript(), "starts the tray task");
+        Assert.Equal(@"& schtasks.exe /Run /TN '\DaymanDesk\Tray'", ScheduledTasks.StartTrayScript(), "starts the tray task");
     }
 
     public static void TestNetworkModeAcceptsOnlyLocalAddresses()
@@ -471,7 +468,7 @@ public static class AnyPosTests
     public static void TestInstallFailureRestoresEveryPrinter()
     {
         var sh = new MultiShell();
-        sh.Override = s => s.StartsWith("Set-Printer -Name 'Bar' -PortName 'DAYMAN_") ? new ShellResult(1, "", "driver refuses") : null;
+        sh.Override = s => s.StartsWith(PrinterSetup.GetPortScript("Bar").Replace("$p[0].PortName", "")) && s.Contains("PortName = 'DAYMAN_") ? new ShellResult(1, "", "driver refuses") : null;
         var store = new ConfigStore(Path.Combine(Tmp.Dir(), "config.json"));
         bool threw = false;
         try { new PrinterSetup(sh, null).Install(store, new[] { "POS-80", "Bar" }, _ => true); }
@@ -805,17 +802,17 @@ public static class AnyPosTests
         var store = new ConfigStore(Path.Combine(Tmp.Dir(), "config.json"));
         try { new PrinterSetup(sh, null).Install(store, new[] { "Microsoft Print to PDF" }, _ => true); throw new AssertException("install accepted a pdf printer"); }
         catch (SetupException ex) { Assert.True(ex.Arabic.Contains("لا تصلح"), "refused: " + ex.Arabic); }
-        Assert.True(!sh.Scripts.Any(s => s.StartsWith("Set-Printer")), "nothing moved");
+        Assert.True(!sh.Scripts.Any(s => s.Contains(".Put()") && s.Contains("$p[0].PortName =")), "nothing moved");
     }
 
     public static void TestDeletedPrinterIsNothingToRestore()
     {
         var sh = new MultiShell();
-        sh.Override = s => s.StartsWith("(Get-Printer -Name 'Gone')") ? new ShellResult(1, "", "not found")
+        sh.Override = s => s == PrinterSetup.GetPortScript("Gone") ? new ShellResult(1, "", "not found")
             : s.Contains("'missing'") && s.Contains("'Gone'") ? new ShellResult(0, "missing", "") : null;
         var setup = new PrinterSetup(sh, null);
         Assert.True(!setup.Restore(new PrinterRoute { PrinterName = "Gone", OriginalPort = "USB002", ListenPort = 9100 }), "deleted: no throw");
-        sh.Override = s => s.StartsWith("(Get-Printer -Name 'Gone')") ? new ShellResult(1, "", "rpc error") : null;
+        sh.Override = s => s == PrinterSetup.GetPortScript("Gone") ? new ShellResult(1, "", "rpc error") : null;
         try { setup.Restore(new PrinterRoute { PrinterName = "Gone", OriginalPort = "USB002", ListenPort = 9100 }); throw new AssertException("unreadable port accepted"); }
         catch (SetupException) { }
     }
@@ -824,7 +821,7 @@ public static class AnyPosTests
     {
         var sh = new MultiShell();
         string spooler = "Running";
-        sh.Override = s => s.StartsWith("(Get-Printer -Name 'POS-80')") ? new ShellResult(1, "", "spooler not running")
+        sh.Override = s => s == PrinterSetup.GetPortScript("POS-80") ? new ShellResult(1, "", "spooler not running")
             : s.StartsWith("if ((Get-Service") ? new ShellResult(0, spooler == "Running" ? "missing" : "spooler", "") : null;
         Assert.True(PrinterSetup.MissingScript("POS-80").Contains("Get-Service -Name Spooler") && PrinterSetup.MissingScript("POS-80").Contains("-ErrorAction Stop"), "script checks the spooler");
         var setup = new PrinterSetup(sh, null);

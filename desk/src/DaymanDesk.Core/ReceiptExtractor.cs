@@ -154,7 +154,7 @@ public static class ReceiptExtractor
             if (char.IsDigit(c) || LabelPunctuation.IndexOf(c) >= 0) sb.Append(' ');
             else sb.Append(c);
         }
-        return string.Join(' ', sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        return string.Join(" ", sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
     const string LabelPunctuation = ".,:;#/\\-_*=|()[]%+";
@@ -170,7 +170,7 @@ public static class ReceiptExtractor
     public static string ShapeKey(string raw)
     {
         var n = NumberRx.Replace(ClockRx.Replace(TextNormalizer.Normalize(raw), "9"), "9");
-        return string.Join(' ', n.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        return string.Join(" ", n.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
     }
 
     /// <summary>A shape worth matching: at least two characters besides the numbers (never a bare number line).</summary>

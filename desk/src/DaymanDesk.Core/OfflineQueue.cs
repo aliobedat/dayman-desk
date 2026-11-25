@@ -100,6 +100,6 @@ public sealed class OfflineQueue
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         var tmp = _path + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(_items, DeskApiClient.Json));
-        File.Move(tmp, _path, true);
+        FileUtil.MoveOverwrite(tmp, _path);
     }
 }

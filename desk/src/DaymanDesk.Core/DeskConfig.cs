@@ -89,6 +89,14 @@ public sealed class DeskConfig
     public string? ClaimBase { get; set; }
     public Dictionary<string, string> PrintedCodes { get; set; } = new();
 
+    // WO-95 (contract v1.3): the signing key (base64 X|Y|D, sealed with DPAPI like the token), this device's number in
+    // the shop, whether the server holds the key, and the next seq of a signed QR (never reused, kept across pairings).
+    // PrintedCodes holds "r:" + token for an invoice that got a signed QR (a reprint prints the same QR).
+    public string? SignKeyProtected { get; set; }
+    public int? DeviceNumber { get; set; }
+    public bool KeyRegistered { get; set; }
+    public long NextSeq { get; set; } = 1;
+
     // Learned from the shop's receipts
     public int? CodePage { get; set; }
     public int? CodeTable { get; set; }
@@ -172,6 +180,8 @@ public sealed class ConfigStore
     readonly object _lock = new();
     readonly ITokenProtector? _protector;
     public DeskConfig Current { get; private set; }
+    /// <summary>WO-95: seals the signing key as it seals the token (null: stored as is, tests only).</summary>
+    public ITokenProtector? Protector => _protector;
 
     /// <param name="migrateNow">False defers sealing a plain v0 token until MigrateToken is called.</param>
     public ConfigStore(string path, ITokenProtector? protector = null, bool migrateNow = true)
@@ -332,7 +342,7 @@ public sealed class ConfigStore
         File.WriteAllText(tmp, JsonSerializer.Serialize(Current, new JsonSerializerOptions(DeskApiClient.Json) { WriteIndented = true }));
         // Keep the last good file: the watchdog falls back to it if config.json is ever unreadable.
         if (TryRead(_path) != null) File.Copy(_path, BackupPath, true);
-        File.Move(tmp, _path, true);
+        FileUtil.MoveOverwrite(tmp, _path);
     }
 
     /// <summary>

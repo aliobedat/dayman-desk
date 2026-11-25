@@ -7,7 +7,7 @@ static class AppIcon
 {
     static readonly Lazy<Icon> Lazy = new(() =>
     {
-        try { return Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? "") ?? SystemIcons.Application; }
+        try { return Icon.ExtractAssociatedIcon(System.Windows.Forms.Application.ExecutablePath) ?? SystemIcons.Application; }
         catch { return SystemIcons.Application; }
     });
 

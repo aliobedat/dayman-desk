@@ -10,7 +10,7 @@ static class Installer
     public static string InstalledExe => Path.Combine(InstallDir, "DaymanDesk.exe");
 
     public static bool RunningInstalled =>
-        Environment.ProcessPath is { } p && string.Equals(Path.GetFullPath(p), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
+        string.Equals(Path.GetFullPath(Application.ExecutablePath), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The SYSTEM task always points at Program Files, never at the download folder (a user could replace a
@@ -18,7 +18,7 @@ static class Installer
     /// </summary>
     public static void EnsureInstalled(IShell sh, RollingLog log)
     {
-        string current = Environment.ProcessPath ?? InstalledExe;
+        string current = Application.ExecutablePath;
         if (!string.Equals(Path.GetFullPath(current), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase))
         {
             try
@@ -54,21 +54,35 @@ static class Installer
         if (!r.Ok) log.Warn("start menu shortcut not created: " + r.Stderr);
     }
 
-    /// <summary>The config holds the device token: only SYSTEM and Administrators may read the data folder.</summary>
-    public static void LockDataDir(RollingLog log)
+    /// <summary>
+    /// The config holds the device token and the OCR folder holds native DLLs: only SYSTEM and Administrators may read
+    /// or write the data folder. WO-95b: everything inside is reset to inherit that ACL and owned by Administrators (a
+    /// file a user planted before keeps no rights of its own). False when any step failed (the OCR then stays off).
+    /// </summary>
+    public static bool LockDataDir(RollingLog log)
     {
-        Directory.CreateDirectory(Runtime.DataDir);
-        var psi = new ProcessStartInfo("icacls") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var a in new[] { Runtime.DataDir, "/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F" })
-            psi.ArgumentList.Add(a);
+        var dir = Runtime.DataDir;
+        Directory.CreateDirectory(dir);
+        bool ok = Icacls(log, $"\"{dir}\" /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F");
+        if (Directory.EnumerateFileSystemEntries(dir).Any()) ok &= Icacls(log, $"\"{Path.Combine(dir, "*")}\" /reset /T /C /Q");
+        ok &= Icacls(log, $"\"{dir}\" /setowner *S-1-5-32-544 /T /C /Q");
+        return ok;
+    }
+
+    static bool Icacls(RollingLog log, string args)
+    {
+        var psi = new ProcessStartInfo("icacls", args)
+        { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
         try
         {
             using var p = Process.Start(psi)!;
+            var outTask = p.StandardOutput.ReadToEndAsync();
             string err = p.StandardError.ReadToEnd();
-            p.StandardOutput.ReadToEnd();
-            p.WaitForExit(30_000);
-            if (p.ExitCode != 0) log.Warn($"icacls exit {p.ExitCode}: {err.Trim()}");
+            if (!p.WaitForExit(60_000)) { try { p.Kill(); } catch { } log.Warn("icacls timeout"); return false; }
+            outTask.Wait();
+            if (p.ExitCode != 0) { log.Warn($"icacls exit {p.ExitCode}: {err.Trim()}"); return false; }
+            return true;
         }
-        catch (Exception ex) { log.Error("icacls failed: " + ex.Message); }
+        catch (Exception ex) { log.Error("icacls failed: " + ex.Message); return false; }
     }
 }

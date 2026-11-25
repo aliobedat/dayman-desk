@@ -18,10 +18,9 @@ sealed class Runtime : IDisposable
     public readonly IShell Shell;
     public readonly PrinterSetup Setup;
     public readonly PassThroughServer Server;
-    public readonly WindowsOcr Ocr;
+    public readonly TesseractOcr Ocr;
     readonly HttpClient _http;
     System.Threading.Timer? _heartbeat;
-    int _ocrInstallStarted;
     public DeskAgent Agent { get; private set; }
 
     public event Action<ReceiptRecord>? ReceiptProcessed;
@@ -35,13 +34,13 @@ sealed class Runtime : IDisposable
     {
         Directory.CreateDirectory(DataDir);
         Log = new RollingLog(Path.Combine(DataDir, "logs"));
-        Installer.LockDataDir(Log); // before the token is ever written
+        bool locked = Installer.LockDataDir(Log); // before the token is ever written
         Cfg = OpenConfig(Log);
         Samples = new SampleStore(Path.Combine(DataDir, "samples"));
         Queue = new OfflineQueue(Path.Combine(DataDir, "queue.json"));
         Shell = new PowerShellShell(Log);
         Setup = new PrinterSetup(Shell, Log);
-        Ocr = new WindowsOcr(Log);
+        Ocr = new TesseractOcr(Log, locked);
         _http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("DaymanDesk/" + Version);
         Server = new PassThroughServer(new WinspoolQueue(), Log, OnForwardFailed);
@@ -128,7 +127,6 @@ sealed class Runtime : IDisposable
             }
             if (cfg.Active) StartPrinters();
             StartNetwork();
-            EnsureOcrLanguages();
         }
         _heartbeat = new System.Threading.Timer(_ => _ = SafeHeartbeat(), null, TimeSpan.FromSeconds(15), HeartbeatEvery);
         StateChanged?.Invoke();
@@ -173,7 +171,6 @@ sealed class Runtime : IDisposable
         Cfg.Update(c => c.RestoredAtExit = false);
         Setup.Install(Cfg, printers, r => Server.Start(r));
         Agent.ClearProblem(Problems.ForwardFailed, Problems.ListenerBusy, Problems.RestoreFailed, Problems.UpdateInstallFailed);
-        EnsureOcrLanguages();
         StateChanged?.Invoke();
     }
 
@@ -214,7 +211,6 @@ sealed class Runtime : IDisposable
             if (!Server.Start(Cfg.Current.Network.Route()!))
                 throw new SetupException($"المنفذ {listenPort} على هذا الجهاز مستخدم من برنامج آخر. اختر منفذاً آخر.");
             Agent.ClearProblem(Problems.ListenerBusy);
-            EnsureOcrLanguages();
         }
         catch (Exception) when (enabled)
         {
@@ -237,26 +233,6 @@ sealed class Runtime : IDisposable
             Log.Warn("network mode: change failed, previous setting restored");
         }
         catch (Exception ex) { Log.Error("network mode: restoring the previous setting failed: " + ex.Message); }
-    }
-
-    /// <summary>
-    /// Adds the Arabic and English OCR languages if missing (Windows Update download, can take minutes), once per
-    /// run, in the background. Best effort: a failure is logged and reported; English digits still read.
-    /// </summary>
-    void EnsureOcrLanguages()
-    {
-        if (Interlocked.Exchange(ref _ocrInstallStarted, 1) == 1) return;
-        Task.Run(() =>
-        {
-            var r = new PowerShellShell(Log, timeoutMs: 20 * 60_000).Run(OcrLanguages.InstallScript());
-            Ocr.Reset();
-            if (r.Ok) Log.Info("ocr languages: " + r.Stdout);
-            else
-            {
-                var why = (r.Stdout + " " + r.Stderr).Trim();
-                _ = Agent.ReportAsync("warn", "other", "ocr language install failed: " + (why.Length > 600 ? why[..600] : why));
-            }
-        });
     }
 
     /// <summary>«تأكيد الحقول» from the window. Null on success, else the Arabic reason.</summary>

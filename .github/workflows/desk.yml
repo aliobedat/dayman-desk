@@ -16,6 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The SDK builds both the net8 tests and the net48 program (reference assemblies from NuGet).
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
@@ -23,11 +24,84 @@ jobs:
       - name: Tests (Core)
         run: dotnet run --project desk/tests/DaymanDesk.Tests -c Release
 
-      - name: Publish DaymanDesk.exe
-        run: >
-          dotnet publish desk/src/DaymanDesk.App -c Release -r win-x64 --self-contained
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
-          -o desk/publish
+      # WO-95: tessdata_fast (Arabic + English), embedded in the exe; not kept in git.
+      - name: OCR data
+        shell: pwsh
+        run: |
+          $d = "desk/src/DaymanDesk.App/tessdata"
+          New-Item -ItemType Directory -Force $d | Out-Null
+          foreach ($l in "ara", "eng") {
+            Invoke-WebRequest "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/$l.traineddata" -OutFile "$d/$l.traineddata"
+            Write-Host "$l $((Get-Item "$d/$l.traineddata").Length) bytes"
+          }
+
+      # WO-95b: the VC++ 2015-2022 runtime and the UCRT, shipped app-local next to the OCR natives (a bare Windows 7).
+      - name: VC++ runtime
+        shell: powershell
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $kits = "${env:ProgramFiles(x86)}\Windows Kits\10\Redist"
+          foreach ($a in "x64", "x86") {
+            $dst = "desk/src/DaymanDesk.App/vcrt/$a"
+            New-Item -ItemType Directory -Force $dst | Out-Null
+            # Prefer the VS 2022 (VC143) runtime: newer ones may drop Windows 7.
+            $crt = @(Get-ChildItem "$vs\VC\Redist\MSVC\*\$a\Microsoft.VC143.CRT" -Directory -ErrorAction SilentlyContinue) | Sort-Object FullName | Select-Object -Last 1
+            if (-not $crt) { $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\$a\Microsoft.VC14*.CRT" -Directory | Sort-Object FullName | Select-Object -Last 1 }
+            if (-not $crt) { throw "no VC++ redist for $a" }
+            foreach ($f in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll") { if (Test-Path "$($crt.FullName)\$f") { Copy-Item "$($crt.FullName)\$f" $dst } }
+            $ucrt = @(Get-ChildItem "$kits\*\ucrt\DLLs\$a", "$kits\ucrt\DLLs\$a" -Directory -ErrorAction SilentlyContinue) | Sort-Object FullName | Select-Object -Last 1
+            if (-not $ucrt) { throw "no UCRT redist for $a" }
+            Copy-Item "$($ucrt.FullName)\*.dll" $dst
+            if (-not (Test-Path "$dst\ucrtbase.dll") -or -not (Test-Path "$dst\vcruntime140.dll")) { throw "runtime incomplete for $a" }
+            Write-Host "$a : $($crt.FullName) + $($ucrt.FullName), $((Get-ChildItem $dst).Count) files"
+          }
+
+      # WO-95: .NET Framework 4.8 (Windows 7 SP1 to 11); Costura merges the managed DLLs into one exe.
+      - name: Build DaymanDesk.exe
+        shell: powershell
+        run: |
+          dotnet build desk/src/DaymanDesk.App -c Release
+          New-Item -ItemType Directory -Force desk/publish | Out-Null
+          Copy-Item desk/src/DaymanDesk.App/bin/Release/net48/DaymanDesk.exe desk/publish/DaymanDesk.exe
+          $exe = Get-Item desk/publish/DaymanDesk.exe
+          Write-Host "DaymanDesk.exe $([math]::Round($exe.Length / 1MB, 1)) MB"
+          $names = [Reflection.Assembly]::LoadFile($exe.FullName).GetManifestResourceNames()
+          $names | Where-Object { $_ -like 'ocr/*' } | ForEach-Object { Write-Host "  $_" }
+          foreach ($want in 'ocr/tessdata/ara.traineddata', 'ocr/tessdata/eng.traineddata') { if ($names -notcontains $want) { throw "missing resource $want" } }
+          if (-not ($names | Where-Object { $_ -like 'ocr/x64/tesseract*.dll' })) { throw "missing native tesseract (x64)" }
+          if (-not ($names | Where-Object { $_ -like 'ocr/x86/tesseract*.dll' })) { throw "missing native tesseract (x86)" }
+
+      # WO-95b: the bundled OCR reads a synthetic receipt (both reads must give the invoice number and the total).
+      - name: OCR self-test
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $png = Join-Path $pwd "desk/ocr-selftest.png"
+          $bmp = New-Object System.Drawing.Bitmap 576, 420
+          $g = [System.Drawing.Graphics]::FromImage($bmp)
+          $g.Clear([System.Drawing.Color]::White)
+          $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::SingleBitPerPixelGridFit
+          $font = New-Object System.Drawing.Font "Arial", 20
+          $y = 10
+          foreach ($l in "JAMRA RESTAURANT", "Invoice No: 10432", "Date 19/11/2026 18:02", "Burger x2        8.000", "Grand Total     12.500 JOD", "Thank you") {
+            $g.DrawString($l, $font, [System.Drawing.Brushes]::Black, 10, $y); $y += 60
+          }
+          $g.Dispose(); $bmp.Save($png, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose()
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $p = Start-Process desk/publish/DaymanDesk.exe -ArgumentList '--ocr-selftest', "`"$png`"" -PassThru -Wait
+          Write-Host "self-test: exit $($p.ExitCode) in $($sw.ElapsedMilliseconds) ms (first run includes the extraction)"
+          Get-Content "$png.txt"
+          if ($p.ExitCode -ne 0) { throw "OCR self-test failed" }
+          if (-not ((Get-Content "$png.txt" -Raw) -match 'invoice 10432/10432 total 12\.5')) { throw "OCR read the wrong numbers" }
+
+      # WO-95b: key, DPAPI seal, P1363 signature and SPKI verify on .NET Framework.
+      - name: Signing self-test
+        shell: powershell
+        run: |
+          $out = Join-Path $pwd "desk/sign-selftest.txt"
+          $p = Start-Process desk/publish/DaymanDesk.exe -ArgumentList '--sign-selftest', "`"$out`"" -PassThru -Wait
+          Get-Content $out
+          if ($p.ExitCode -ne 0) { throw "signing self-test failed" }
 
       - name: Version and SHA256
         id: meta

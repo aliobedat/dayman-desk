@@ -303,15 +303,15 @@ public static class SetupTests
         Assert.True(store.Current.Active, "active");
         Assert.Equal("USB001", store.Current.OriginalPort, "original saved");
         Assert.Equal("POS-80 Driver", store.Current.OriginalDriver, "driver saved");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Add-Printer -Name '" + DeskConfig.RawQueueFor("POS-80") + "' -DriverName 'Generic / Text Only' -PortName 'USB001'")), "raw queue on original port");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Add-PrinterPort -Name 'DAYMAN_9100' -PrinterHostAddress '127.0.0.1' -PortNumber 9100")), "tcp port");
-        Assert.True(sh.Scripts.Last().StartsWith("Set-Printer -Name 'POS-80' -PortName 'DAYMAN_9100'"), "switch is the last step");
+        Assert.True(sh.Scripts.Any(s => s == PrinterSetup.AddQueueScript(DeskConfig.RawQueueFor("POS-80"), "USB001")), "raw queue on original port");
+        Assert.True(sh.Scripts.Any(s => s == PrinterSetup.AddTcpPortScript("DAYMAN_9100", 9100)), "tcp port");
+        Assert.True(sh.Scripts.Last() == PrinterSetup.SetPortScript("POS-80", "DAYMAN_9100"), "switch is the last step");
     }
 
     public static void TestInstallFailureRollsBack()
     {
         var sh = new FakeShell();
-        sh.Override = s => s.Contains("Add-PrinterPort") ? new ShellResult(1, "", "access denied") : null;
+        sh.Override = s => s.Contains("Win32_TCPIPPrinterPort'") ? new ShellResult(1, "", "access denied") : null;
         var store = Store();
         bool threw = false;
         try { new PrinterSetup(sh, null).Install(store, new[] { "POS-80" }, _ => true); }
@@ -319,7 +319,7 @@ public static class SetupTests
         Assert.True(threw, "threw");
         Assert.Equal("USB001", sh.Port, "printer untouched");
         Assert.True(!store.Current.Active, "inactive");
-        Assert.True(sh.Scripts.Any(s => s.Contains("Remove-Printer -Name '" + DeskConfig.RawQueueFor("POS-80") + "'")), "raw queue removed");
+        Assert.True(sh.Scripts.Contains(PrinterSetup.RemoveQueueScript(DeskConfig.RawQueueFor("POS-80"))), "raw queue removed");
     }
 
     public static void TestListenerBusyRollsBack()
@@ -375,12 +375,12 @@ public static class SetupTests
         var store = Store();
         var setup = new PrinterSetup(sh, null);
         setup.Install(store, new[] { "POS-80" }, _ => true);
-        sh.Override = s => s.StartsWith("(Get-Printer") ? new ShellResult(1, "", "spooler down") : null;
+        sh.Override = s => s.EndsWith("$p[0].PortName") ? new ShellResult(1, "", "spooler down") : null;
         bool threw = false;
         try { setup.Uninstall(store); } catch (SetupException) { threw = true; }
         Assert.True(threw, "uninstall refuses to claim success");
         Assert.True(store.Current.Active, "still active");
-        Assert.True(!sh.Scripts.Any(x => x.Contains("Remove-Printer")), "raw queue kept while the printer may still point at us");
+        Assert.True(!sh.Scripts.Any(x => x.Contains(".Delete()") && x.Contains("Win32_Printer |")), "raw queue kept while the printer may still point at us");
     }
 
     public static void TestRestoreNotConfirmed()
@@ -389,8 +389,8 @@ public static class SetupTests
         var store = Store();
         var setup = new PrinterSetup(sh, null);
         setup.Install(store, new[] { "POS-80" }, _ => true);
-        // Set-Printer "succeeds" but the port does not change
-        sh.Override = s => s.StartsWith("Set-Printer") ? new ShellResult(0, "", "") : null;
+        // The port change "succeeds" but the port does not change
+        sh.Override = s => s.EndsWith("[void]$p[0].Put()") ? new ShellResult(0, "", "") : null;
         bool threw = false;
         try { setup.Restore(store.Current); } catch (SetupException) { threw = true; }
         Assert.True(threw, "unconfirmed restore throws");
@@ -399,12 +399,13 @@ public static class SetupTests
     public static void TestTaskScripts()
     {
         var w = ScheduledTasks.WatchdogScript(@"C:\Program Files\DaymanDesk\DaymanDesk.exe");
-        foreach (var part in new[] { "Register-ScheduledTask", "-ExecutionTimeLimit ([TimeSpan]::Zero)", "-AllowStartIfOnBatteries",
-                     "-DontStopIfGoingOnBatteries", "-RepetitionInterval (New-TimeSpan -Minutes 1)", "-UserId 'SYSTEM'", "-RunLevel Highest", "'--watchdog'",
-                     @"-Execute 'C:\Program Files\DaymanDesk\DaymanDesk.exe'" })
+        foreach (var part in new[] { @"schtasks.exe /Create /F /TN '\DaymanDesk\Watchdog' /XML", "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>",
+                     "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>", "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
+                     "<Interval>PT1M</Interval>", "<UserId>S-1-5-18</UserId>", "<RunLevel>HighestAvailable</RunLevel>", "<Arguments>--watchdog</Arguments>",
+                     @"<Command>C:\Program Files\DaymanDesk\DaymanDesk.exe</Command>", "[Text.Encoding]::Unicode" })
             Assert.True(w.Contains(part), "watchdog: " + part);
         var t = ScheduledTasks.TrayScript(@"C:\x\DaymanDesk.exe", @"PC\ali");
-        foreach (var part in new[] { @"-AtLogOn -User 'PC\ali'", "-LogonType Interactive", "-ExecutionTimeLimit ([TimeSpan]::Zero)", "'--tray'" })
+        foreach (var part in new[] { @"<LogonTrigger><UserId>PC\ali</UserId>", "<LogonType>InteractiveToken</LogonType>", "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", "<Arguments>--tray</Arguments>" })
             Assert.True(t.Contains(part), "tray: " + part);
     }
 
@@ -416,10 +417,13 @@ public static class SetupTests
 
     public static void TestParsePrinters()
     {
-        var one = PrinterSetup.ParsePrinters("{\"Name\":\"طابعة\",\"PortName\":\"USB001\",\"DriverName\":\"d\"}");
-        Assert.Equal(1, one.Count, "single object");
+        // WO-95: ListScript prints tab-separated lines (PowerShell 2.0 has no ConvertTo-Json).
+        var one = PrinterSetup.ParsePrinters("طابعة\tUSB001\td\t\t0\t0\r\n");
+        Assert.Equal(1, one.Count, "single line");
         Assert.Equal("طابعة", one[0].Name, "arabic name");
-        Assert.Equal(0, PrinterSetup.ParsePrinters("[]").Count, "empty");
+        var tcp = PrinterSetup.ParsePrinters("Bar\tIP_1\tEpson\t192.168.1.50\t9100\t1")[0];
+        Assert.True(tcp.RawTcp && tcp.Host == "192.168.1.50" && tcp.PortNumber == 9100, "raw tcp port");
+        Assert.Equal(0, PrinterSetup.ParsePrinters("").Count, "empty");
     }
 }
 

@@ -14,7 +14,10 @@ public interface IShell
     ShellResult Run(string script);
 }
 
-/// <summary>Runs Windows PowerShell 5.1 with the script passed as -EncodedCommand (no quoting problems).</summary>
+/// <summary>
+/// Runs Windows PowerShell with the script passed as -EncodedCommand (no quoting problems). WO-95: every script works
+/// on PowerShell 2.0 (Windows 7) to 5.1: WMI, netsh and schtasks only, no cmdlet of Windows 8 or later.
+/// </summary>
 public sealed class PowerShellShell : IShell
 {
     readonly RollingLog? _log;
@@ -45,7 +48,7 @@ public sealed class PowerShellShell : IShell
             var errTask = p.StandardError.ReadToEndAsync();
             if (!p.WaitForExit(_timeoutMs))
             {
-                try { p.Kill(true); } catch { }
+                try { p.Kill(); } catch { }
                 _log?.Error("ps timeout");
                 return new ShellResult(-1, "", "timeout");
             }
@@ -129,11 +132,41 @@ public sealed class PrinterSetup
         return sb.Append('\'').ToString();
     }
 
-    /// <summary>Every queue with its port; a Standard TCP/IP port adds its host, port number and protocol (1 = RAW).</summary>
+    /// <summary>
+    /// Every queue with its port, one tab-separated line each (PowerShell 2.0 has no ConvertTo-Json): name, port,
+    /// driver, and for a Standard TCP/IP port its host, port number and protocol (1 = RAW).
+    /// </summary>
     public const string ListScript =
-        "ConvertTo-Json -Compress -InputObject @(Get-Printer | ForEach-Object { $pp = Get-PrinterPort -Name $_.PortName -ErrorAction SilentlyContinue; " +
-        "[pscustomobject]@{ Name = $_.Name; PortName = $_.PortName; DriverName = $_.DriverName; Host = [string]$pp.PrinterHostAddress; " +
-        "PortNumber = [int]$pp.PortNumber; Protocol = [int]$pp.Protocol } })";
+        "$tp = @{}; Get-WmiObject Win32_TCPIPPrinterPort | ForEach-Object { $tp[$_.Name] = $_ }\n" +
+        "Get-WmiObject Win32_Printer | ForEach-Object { $q = $tp[$_.PortName]; " +
+        "@($_.Name, $_.PortName, $_.DriverName, [string]$q.HostAddress, [string][int]$q.PortNumber, [string][int]$q.Protocol) -join \"`t\" }";
+
+    /// <summary>$p: the one queue with this exact name (WMI, no WQL escaping), else the script fails.</summary>
+    static string Printer(string name) =>
+        $"$p = @(Get-WmiObject Win32_Printer | Where-Object {{ $_.Name -eq {Q(name)} }}); if ($p.Count -ne 1) {{ throw 'printer not found' }}; ";
+
+    public static string GetPortScript(string printer) => Printer(printer) + "$p[0].PortName";
+
+    public static string SetPortScript(string printer, string port) =>
+        Printer(printer) + $"$p[0].PortName = {Q(port)}; [void]$p[0].Put()";
+
+    /// <summary>A WMI class with its privileges on (adding drivers, queues and ports needs them).</summary>
+    static string Cls(string name) => $"$c = [wmiclass]'{name}'; $c.Scope.Options.EnablePrivileges = $true; ";
+
+    public static string AddDriverScript() =>
+        $"if (-not @(Get-WmiObject Win32_PrinterDriver | Where-Object {{ $_.Name -like {Q(GenericDriver + ",*")} }}).Count) {{ " +
+        Cls("Win32_PrinterDriver") + $"$d = $c.CreateInstance(); $d.Name = {Q(GenericDriver)}; $r = $c.AddPrinterDriver($d); " +
+        "if ($r.ReturnValue -ne 0) { throw \"AddPrinterDriver $($r.ReturnValue)\" } }";
+
+    public static string AddQueueScript(string name, string port) =>
+        $"if (-not @(Get-WmiObject Win32_Printer | Where-Object {{ $_.Name -eq {Q(name)} }}).Count) {{ " +
+        Cls("Win32_Printer") + $"$n = $c.CreateInstance(); $n.DeviceID = {Q(name)}; $n.DriverName = {Q(GenericDriver)}; " +
+        $"$n.PortName = {Q(port)}; $n.Network = $false; $n.Shared = $false; [void]$n.Put() }}";
+
+    public static string AddTcpPortScript(string name, int port) =>
+        $"if (-not @(Get-WmiObject Win32_TCPIPPrinterPort | Where-Object {{ $_.Name -eq {Q(name)} }}).Count) {{ " +
+        Cls("Win32_TCPIPPrinterPort") + $"$n = $c.CreateInstance(); $n.Name = {Q(name)}; $n.Protocol = 1; " +
+        $"$n.HostAddress = '127.0.0.1'; $n.PortNumber = {port.ToString(System.Globalization.CultureInfo.InvariantCulture)}; $n.SNMPEnabled = $false; [void]$n.Put() }}";
 
     public List<PrinterInfo> ListPrinters()
     {
@@ -142,27 +175,24 @@ public sealed class PrinterSetup
         return ParsePrinters(r.Stdout);
     }
 
-    public static List<PrinterInfo> ParsePrinters(string json)
+    /// <summary>The lines of ListScript.</summary>
+    public static List<PrinterInfo> ParsePrinters(string text)
     {
         var list = new List<PrinterInfo>();
-        if (string.IsNullOrWhiteSpace(json)) return list;
-        using var doc = JsonDocument.Parse(json);
-        IEnumerable<JsonElement> items = doc.RootElement.ValueKind == JsonValueKind.Array
-            ? doc.RootElement.EnumerateArray()
-            : new[] { doc.RootElement };
-        foreach (var e in items)
+        foreach (var line in (text ?? "").Split('\n'))
         {
-            string S(string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-            int N(string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i) ? i : 0;
-            if (S("Name").Length > 0)
-                list.Add(new PrinterInfo(S("Name"), S("PortName"), S("DriverName"), S("Host").Length > 0 ? S("Host") : null, N("PortNumber"), N("Protocol")));
+            var f = line.TrimEnd('\r').Split('\t');
+            if (f.Length < 3 || f[0].Length == 0) continue;
+            string F(int i) => i < f.Length ? f[i].Trim() : "";
+            int N(int i) => int.TryParse(F(i), out var n) ? n : 0;
+            list.Add(new PrinterInfo(f[0], F(1), F(2), F(3).Length > 0 ? F(3) : null, N(4), N(5)));
         }
         return list;
     }
 
     public string? GetPort(string printer)
     {
-        var r = _sh.Run($"(Get-Printer -Name {Q(printer)}).PortName");
+        var r = _sh.Run(GetPortScript(printer));
         return r.Ok ? r.Stdout.Trim() : null;
     }
 
@@ -181,7 +211,7 @@ public sealed class PrinterSetup
 
     public static string MissingScript(string printer) =>
         "if ((Get-Service -Name Spooler).Status -ne 'Running') { 'spooler' } " +
-        $"elseif (@(Get-Printer -ErrorAction Stop | ForEach-Object {{ $_.Name }}) -contains {Q(printer)}) {{ 'present' }} else {{ 'missing' }}";
+        $"elseif (@(Get-WmiObject Win32_Printer -ErrorAction Stop | ForEach-Object {{ $_.Name }}) -contains {Q(printer)}) {{ 'present' }} else {{ 'missing' }}";
 
     /// <summary>WO-91: a restore since the last reset skipped a printer deleted from Windows (the watchdog keeps watching).</summary>
     public bool SkippedMissing { get; set; }
@@ -254,21 +284,18 @@ public sealed class PrinterSetup
 
         try
         {
-            Must($"if (-not (Get-PrinterDriver -Name {Q(GenericDriver)} -ErrorAction SilentlyContinue)) {{ Add-PrinterDriver -Name {Q(GenericDriver)} }}",
-                "تعذّر تثبيت تعريف Generic / Text Only.");
+            Must(AddDriverScript(), "تعذّر تثبيت تعريف Generic / Text Only.");
             foreach (var r in routes)
             {
-                Must($"if (-not (Get-Printer -Name {Q(r.RawQueueName!)} -ErrorAction SilentlyContinue)) {{ Add-Printer -Name {Q(r.RawQueueName!)} -DriverName {Q(GenericDriver)} -PortName {Q(r.OriginalPort!)} }}",
-                    $"تعذّر إنشاء طابعة دايماً على المنفذ الأصلي للطابعة «{r.PrinterName}».");
-                Must($"if (-not (Get-PrinterPort -Name {Q(r.TcpPortName)} -ErrorAction SilentlyContinue)) {{ Add-PrinterPort -Name {Q(r.TcpPortName)} -PrinterHostAddress '127.0.0.1' -PortNumber {r.ListenPort} }}",
-                    $"تعذّر إنشاء المنفذ 127.0.0.1:{r.ListenPort}.");
+                Must(AddQueueScript(r.RawQueueName!, r.OriginalPort!), $"تعذّر إنشاء طابعة دايماً على المنفذ الأصلي للطابعة «{r.PrinterName}».");
+                Must(AddTcpPortScript(r.TcpPortName, r.ListenPort), $"تعذّر إنشاء المنفذ 127.0.0.1:{r.ListenPort}.");
             }
             foreach (var r in routes)
                 if (!startListener(r))
                     throw new SetupException($"المنفذ {r.ListenPort} على هذا الجهاز مستخدم من برنامج آخر.");
             // Moving the POS printers is the last step, once every listener runs.
             foreach (var r in routes)
-                Must($"Set-Printer -Name {Q(r.PrinterName!)} -PortName {Q(r.TcpPortName)}",
+                Must(SetPortScript(r.PrinterName!, r.TcpPortName),
                     $"تعذّر توجيه الطابعة «{r.PrinterName}» إلى دايماً ديسك.");
             store.Update(c => c.Active = true);
             _log?.Info("install: done");
@@ -282,8 +309,8 @@ public sealed class PrinterSetup
         }
     }
 
-    static string RemoveQueueScript(string raw) =>
-        $"if (Get-Printer -Name {Q(raw)} -ErrorAction SilentlyContinue) {{ Remove-Printer -Name {Q(raw)} }}";
+    public static string RemoveQueueScript(string raw) =>
+        $"Get-WmiObject Win32_Printer | Where-Object {{ $_.Name -eq {Q(raw)} }} | ForEach-Object {{ $_.Delete() }}";
 
     void Must(string script, string arabic)
     {
@@ -302,7 +329,7 @@ public sealed class PrinterSetup
         if (port == null && Missing(route.PrinterName)) { _log?.Warn($"printer «{route.PrinterName}» no longer exists: nothing to restore"); return false; }
         if (port == null) throw new SetupException($"تعذّرت قراءة منفذ الطابعة «{route.PrinterName}»، فلم نتأكد من إرجاعها.");
         if (!DeskConfig.IsDaymanPort(port)) return false;
-        var r = _sh.Run($"Set-Printer -Name {Q(route.PrinterName)} -PortName {Q(route.OriginalPort)}");
+        var r = _sh.Run(SetPortScript(route.PrinterName, route.OriginalPort));
         if (!r.Ok) throw new SetupException("تعذّر إرجاع الطابعة إلى منفذها الأصلي: " + route.OriginalPort, r.Stderr);
         var after = GetPort(route.PrinterName);
         if (after != route.OriginalPort)
@@ -335,7 +362,7 @@ public sealed class PrinterSetup
             if (string.IsNullOrEmpty(route.PrinterName) || !listening(route)) continue;
             var port = GetPort(route.PrinterName);
             if (port == null || port == route.TcpPortName) continue;
-            var r = _sh.Run($"Set-Printer -Name {Q(route.PrinterName)} -PortName {Q(route.TcpPortName)}");
+            var r = _sh.Run(SetPortScript(route.PrinterName, route.TcpPortName));
             if (!r.Ok) throw new SetupException($"تعذّر توجيه الطابعة «{route.PrinterName}» إلى دايماً ديسك.", r.Stderr);
             _log?.Info("assigned " + route.TcpPortName);
             any = true;
@@ -361,23 +388,28 @@ public sealed class PrinterSetup
         }
         foreach (var r in cfg.Printers.Where(r => !string.IsNullOrEmpty(r.RawQueueName)))
             _sh.Run(RemoveQueueScript(r.RawQueueName!));
-        _sh.Run("$used = @(Get-Printer | ForEach-Object { $_.PortName }); " +
-                "Get-PrinterPort -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'DAYMAN_*' -and $used -notcontains $_.Name } | " +
-                "ForEach-Object { Start-Sleep -Seconds 2; Remove-PrinterPort -Name $_.Name }");
+        _sh.Run("$used = @(Get-WmiObject Win32_Printer | ForEach-Object { $_.PortName }); " +
+                "Get-WmiObject Win32_TCPIPPrinterPort | Where-Object { $_.Name -like 'DAYMAN_*' -and $used -notcontains $_.Name } | " +
+                "ForEach-Object { Start-Sleep -Seconds 2; $_.Delete() }");
         store.Update(c => c.Active = false);
     }
 }
 
-/// <summary>The inbound rule of «وضع الشبكة»: TCP on its port, from the local subnet only.</summary>
+/// <summary>
+/// The inbound rule of «وضع الشبكة»: TCP on its port, from the local subnet only. WO-95: netsh advfirewall (Windows 7 to
+/// 11); the removal also deletes the rule 1.x made with New-NetFirewallRule (its display name).
+/// </summary>
 public static class Firewall
 {
     public static readonly string RemoveScript =
-        $"Get-NetFirewallRule -Name {PrinterSetup.Q(PrinterSetup.FirewallRule)} -ErrorAction SilentlyContinue | Remove-NetFirewallRule";
+        $"& netsh advfirewall firewall delete rule name={PrinterSetup.FirewallRule} | Out-Null; " +
+        "& netsh advfirewall firewall delete rule 'name=Dayman Desk network mode' | Out-Null; $global:LASTEXITCODE = 0";
 
     public static string AddScript(int port) =>
         RemoveScript + "\n" +
-        $"New-NetFirewallRule -Name {PrinterSetup.Q(PrinterSetup.FirewallRule)} -DisplayName 'Dayman Desk network mode' -Direction Inbound " +
-        $"-Action Allow -Protocol TCP -LocalPort {port} -RemoteAddress LocalSubnet -Profile Any | Out-Null";
+        $"& netsh advfirewall firewall add rule name={PrinterSetup.FirewallRule} dir=in action=allow protocol=TCP localport={port.ToString(System.Globalization.CultureInfo.InvariantCulture)} " +
+        "remoteip=localsubnet profile=any | Out-Null\n" +
+        "if ($LASTEXITCODE -ne 0) { throw \"netsh $LASTEXITCODE\" }";
 }
 
 /// <summary>The Windows OCR languages (WO-89): Arabic for the labels, English as the fallback (digits still read).</summary>
