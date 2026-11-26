@@ -84,6 +84,19 @@ static class Screenshots
             Pump();
             Save(form, Path.Combine(dir, "pair-paired.png"));
 
+            // WO-109: the OCR-unavailable problem on Windows 7: the update button and its restart hint.
+            rt.Cfg.Update(c => { c.FieldsConfirmed = true; c.LastProblem = Problems.OcrUnavailable; c.LastProblemAt = Amman.Now; c.LastPrintKind = "image"; });
+            MainForm.PreviewWin7 = true;
+            form.RefreshForPreview();
+            tabs.SelectedIndex = 0;
+            Pump();
+            if (ScrollToEnd(tabs.TabPages[0])) Pump();
+            Save(form, Path.Combine(dir, "status-win7.png"));
+            ScrollToTop(tabs.TabPages[0]);
+            MainForm.PreviewWin7 = false;
+            rt.Cfg.Update(c => { c.FieldsConfirmed = false; c.LastProblem = null; c.LastProblemAt = null; c.LastPrintKind = "text"; });
+            form.RefreshForPreview();
+
             var p = new FieldConfirmation { Lines = sample, InvoiceLine = 2, TotalLine = 8, InvoiceNo = "10432", Total = 6.670m, At = Amman.Now };
             using var dlg = new ConfirmFieldsForm(p, (_, _) => null);
             dlg.StartPosition = FormStartPosition.Manual;

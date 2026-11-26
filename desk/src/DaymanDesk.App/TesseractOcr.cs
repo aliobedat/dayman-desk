@@ -90,7 +90,7 @@ sealed class TesseractOcr : IOcr, IDisposable
     public static bool ForcePreload;
 
     /// <summary>Windows 10+ resolves api-ms-win-crt to its own system UCRT; the app-local one is for 7 and 8.x.</summary>
-    static bool Win10OrLater() =>
+    internal static bool Win10OrLater() =>
         Microsoft.Win32.Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentMajorVersionNumber", null) is int v && v >= 10;
 
     /// <summary>

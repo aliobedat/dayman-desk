@@ -85,6 +85,8 @@ sealed class MainForm : Form
     readonly Callout _problem = new(CardWidth);
     readonly RoundButton _problemAction = Ui.Secondary("");
     Action? _problemDo;
+    readonly RoundButton _win7Action = Ui.Secondary("ثبّت تحديث ويندوز");
+    readonly FlowLayoutPanel _win7Box = new() { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, Margin = Padding.Empty, BackColor = Color.Transparent };
     readonly Label _version = Ui.Text("", Ui.Strong, Ui.Ink, CardWidth - 120);
     readonly Label _versionNote = Ui.Text("", Ui.Body, Ui.Muted, CardWidth - 120);
     TabControl? _tabs;
@@ -327,6 +329,10 @@ sealed class MainForm : Form
 
         // Row 2: the last problem as a callout, with what to do.
         _problemAction.Click += (_, _) => _problemDo?.Invoke();
+        // WO-109: on Windows 7 an unavailable OCR is the missing UCRT update; the button opens the short link to it.
+        _win7Action.Click += (_, _) => Ui.OpenUrl("https://daymanjo.com/desk/win7");
+        _win7Box.Controls.Add(_win7Action);
+        _win7Box.Controls.Add(Ui.Text("بعد التثبيت أعد تشغيل الجهاز.", Ui.Body, Ui.Muted));
         stack.Controls.Add(_problem);
 
         // Row 3: printers.
@@ -717,7 +723,8 @@ sealed class MainForm : Form
             }
             _problemDo = act;
             if (label != null) _problemAction.Text = label;
-            _problem.SetAction(label != null ? _problemAction : null);
+            if (c.LastProblem == Problems.OcrUnavailable && (PreviewWin7 || !TesseractOcr.Win10OrLater())) _problem.SetAction(_win7Box);
+            else _problem.SetAction(label != null ? _problemAction : null);
         }
 
         _pairCard.Visible = !c.Paired;
@@ -785,7 +792,7 @@ sealed class MainForm : Form
     }
 
     internal void AddReceiptForPreview(ReceiptRecord r) => AddReceipt(r);
-    internal static bool PreviewConfirm;
+    internal static bool PreviewConfirm, PreviewWin7;
     internal void RefreshForPreview() => RefreshState();
     internal ContextMenuStrip TrayMenuForPreview => _tray.ContextMenuStrip;
 
