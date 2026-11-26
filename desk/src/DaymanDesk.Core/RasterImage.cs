@@ -54,6 +54,33 @@ public sealed class MonoBitmap
         return o;
     }
 
+    /// <summary>
+    /// WO-110: a copy without the ruling lines of a boxed table (black runs of at least a third of the width across,
+    /// or a twelfth of the width down). Tesseract drops a table's cells as a picture; without the lines it reads them.
+    /// </summary>
+    public MonoBitmap WithoutRules()
+    {
+        var o = new MonoBitmap(Width, Height, (byte[])Pixels.Clone());
+        int across = Math.Max(64, Width / 3), down = Math.Max(40, Width / 12);
+        for (int y = 0; y < Height; y++)
+            for (int x = 0; x < Width;)
+            {
+                if (Pixels[y * Width + x] == 0) { x++; continue; }
+                int s = x;
+                while (x < Width && Pixels[y * Width + x] != 0) x++;
+                if (x - s >= across) for (int i = s; i < x; i++) o.Pixels[y * Width + i] = 0;
+            }
+        for (int x = 0; x < Width; x++)
+            for (int y = 0; y < Height;)
+            {
+                if (Pixels[y * Width + x] == 0) { y++; continue; }
+                int s = y;
+                while (y < Height && Pixels[y * Width + x] != 0) y++;
+                if (y - s >= down) for (int i = s; i < y; i++) o.Pixels[i * Width + x] = 0;
+            }
+        return o;
+    }
+
     public MonoBitmap Rows(int y0, int height)
     {
         var px = new byte[Width * height];
@@ -220,6 +247,15 @@ public static class OcrText
     /// (ReceiptExtractor.MergeLineRead: only a value the page lost is taken from it). Null when no OCR engine is available.
     /// </summary>
     public static async Task<IReadOnlyList<string>?> ReadReceiptAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
+    {
+        var lines = await ReadOnceAsync(ocr, image, invoice, total).ConfigureAwait(false);
+        if (lines == null || ReceiptExtractor.Extract(lines, invoice, total, ocr: true).Total != null) return lines;
+        // WO-110: no total read: a boxed table (Talla) hides it; read again without the table's lines.
+        var bare = await ReadOnceAsync(ocr, image.WithoutRules(), invoice, total).ConfigureAwait(false);
+        return bare != null && ReceiptExtractor.Extract(bare, invoice, total, ocr: true).Total != null ? bare : lines;
+    }
+
+    static async Task<IReadOnlyList<string>?> ReadOnceAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
     {
         var page = await ocr.ReadAsync(image).ConfigureAwait(false);
         if (page == null) return null;

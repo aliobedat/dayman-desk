@@ -175,6 +175,24 @@ public static class AnyPosTests
 
     // ---------- 1. several printers: routing ----------
 
+    /// <summary>WO-110: a boxed table hides the total; the read without the table's lines finds it, letters kept.</summary>
+    public static async Task TestBoxedTableTotalReadWithoutRules()
+    {
+        var m = new MonoBitmap(576, 200);
+        void Px(int x, int y) => m.Pixels[y * 576 + x] = 1;
+        for (int x = 20; x < 556; x++) for (int w = 0; w < 3; w++) { Px(x, 10 + w); Px(x, 187 + w); }
+        for (int y = 10; y < 190; y++) for (int w = 0; w < 3; w++) { Px(20 + w, y); Px(553 + w, y); Px(300 + w, y); }
+        for (int y = 60; y < 90; y++) Px(100, y);           // a tall letter (alef), 30 dots
+        for (int x = 120; x < 200; x++) Px(x, 100);         // a letter's baseline stroke, 80 dots
+        var bare = m.WithoutRules();
+        Assert.True(!bare[20, 10] && !bare[300, 50] && !bare[554, 100], "table lines removed");
+        Assert.True(bare[100, 70] && bare[150, 100], "letters kept");
+        var ocr = new FakeOcr { Read = b => b[300, 50] ? new[] { "رقم الفاتورة 64" } : new[] { "رقم الفاتورة 64", "المجموع الكلي 3.50" } };
+        var lines = await OcrText.ReadReceiptAsync(ocr, m, null, null);
+        Assert.Equal(3.50m, ReceiptExtractor.Extract(lines!, ocr: true).Total, "total from the read without rules");
+        Assert.Equal(2, ocr.Seen.Count, "two page reads");
+    }
+
     public static async Task TestEachPrinterHasItsOwnListenerAndQrGoesToIt()
     {
         var q = new FakeQueue();
