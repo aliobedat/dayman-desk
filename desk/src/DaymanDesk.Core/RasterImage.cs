@@ -246,16 +246,63 @@ public static class OcrText
     /// letter words blanked. A large bold total («الإجمالي 1.50 د.ا») that the page read loses is read there
     /// (ReceiptExtractor.MergeLineRead: only a value the page lost is taken from it). Null when no OCR engine is available.
     /// </summary>
-    public static async Task<IReadOnlyList<string>?> ReadReceiptAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
+    public static async Task<IReadOnlyList<string>?> ReadReceiptAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total) =>
+        (await ReadPageAsync(ocr, image, invoice, total).ConfigureAwait(false))?.Lines;
+
+    /// <summary>One page read: its cleaned lines, the OCR lines they came from, and the image they were read on.</summary>
+    sealed class PageRead
     {
-        var lines = await ReadOnceAsync(ocr, image, invoice, total).ConfigureAwait(false);
-        if (lines == null || ReceiptExtractor.Extract(lines, invoice, total, ocr: true).Total != null) return lines;
-        // WO-110: no total read: a boxed table (Talla) hides it; read again without the table's lines.
-        var bare = await ReadOnceAsync(ocr, image.WithoutRules(), invoice, total).ConfigureAwait(false);
-        return bare != null && ReceiptExtractor.Extract(bare, invoice, total, ocr: true).Total != null ? bare : lines;
+        public PageRead(List<string> lines, List<OcrLine> kept, MonoBitmap image) { Lines = lines; Kept = kept; Image = image; }
+        public List<string> Lines { get; }
+        public List<OcrLine> Kept { get; }
+        public MonoBitmap Image { get; }
     }
 
-    static async Task<IReadOnlyList<string>?> ReadOnceAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
+    static async Task<PageRead?> ReadPageAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
+    {
+        var read = await ReadOnceAsync(ocr, image, invoice, total).ConfigureAwait(false);
+        if (read == null || ReceiptExtractor.Extract(read.Lines, invoice, total, ocr: true).Total != null) return read;
+        // WO-110: no total read: a boxed table (Talla) hides it; read again without the table's lines.
+        var bare = await ReadOnceAsync(ocr, image.WithoutRules(), invoice, total).ConfigureAwait(false);
+        return bare != null && ReceiptExtractor.Extract(bare.Lines, invoice, total, ocr: true).Total != null ? bare : read;
+    }
+
+    /// <summary>
+    /// The two independent reads of an image receipt (as printed, then upscaled 2x; WO-110: the 2x read is of the image
+    /// the first read used, without the table's lines when it needed that). WO-111: when the 2x page loses the invoice
+    /// number or the total that the first read found, its two lines are read again at 2x on their own (English digits,
+    /// one line); when both give the same values the first read stands as the second, else the 2x page read does.
+    /// First is null when no OCR engine is available.
+    /// </summary>
+    public static async Task<(IReadOnlyList<string>? First, IReadOnlyList<string>? Second)> ReadTwiceAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
+    {
+        var a = await ReadPageAsync(ocr, image, invoice, total).ConfigureAwait(false);
+        if (a == null) return (null, null);
+        var big = a.Image.Scale2x();
+        var b = await ReadPageAsync(ocr, big, invoice, total).ConfigureAwait(false);
+        var ea = ReceiptExtractor.Extract(a.Lines, invoice, total, ocr: true);
+        var eb = b == null ? null : ReceiptExtractor.Extract(b.Lines, invoice, total, ocr: true);
+        if (eb != null && eb.InvoiceNo != null && eb.Total != null) return (a.Lines, b!.Lines);
+        int ii = ea.InvoiceLine == null ? -1 : a.Lines.IndexOf(ea.InvoiceLine), ti = ea.TotalLine == null ? -1 : a.Lines.IndexOf(ea.TotalLine);
+        if (ea.InvoiceNo == null || ea.Total == null || ii < 0 || ti < 0) return (a.Lines, b?.Lines);
+        var ri = await ReadLineAt2xAsync(ocr, big, a.Kept[ii], InvoiceChars).ConfigureAwait(false);
+        var rt = await ReadLineAt2xAsync(ocr, big, a.Kept[ti], TotalChars).ConfigureAwait(false);
+        string want = ReceiptExtractor.CleanInvoice(ea.InvoiceNo);
+        bool same = ri != null && rt != null
+            && ReceiptExtractor.InvoiceTokens(ri).Any(t => ReceiptExtractor.CleanInvoice(t) == want)
+            && ReceiptExtractor.AmountOf(rt) is decimal v && Math.Round(v, 3) == Math.Round(ea.Total.Value, 3);
+        return (a.Lines, same ? a.Lines : b?.Lines);
+    }
+
+    static async Task<string?> ReadLineAt2xAsync(IOcr ocr, MonoBitmap big, OcrLine line, string chars)
+    {
+        if (line.Bottom <= line.Top) return null;
+        var scaled = new OcrLine(line.Text, line.Top * 2, line.Bottom * 2, line.WordsWithoutDigits.Select(w => (w.Left * 2, w.Right * 2 + 1)).ToList());
+        var read = await ocr.ReadLineAsync(big.LineCrop(scaled), chars).ConfigureAwait(false);
+        return string.IsNullOrWhiteSpace(read) ? null : CleanLine(read!);
+    }
+
+    static async Task<PageRead?> ReadOnceAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
     {
         var page = await ocr.ReadAsync(image).ConfigureAwait(false);
         if (page == null) return null;
@@ -269,7 +316,7 @@ public static class OcrText
             var read = await ocr.ReadLineAsync(image.LineCrop(kept[i]), isTotal ? TotalChars : InvoiceChars).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(read)) lines[i] = ReceiptExtractor.MergeLineRead(lines[i], CleanLine(read!), isTotal);
         }
-        return lines;
+        return new PageRead(lines, kept, image);
     }
 
     /// <summary>
@@ -293,10 +340,8 @@ public static class OcrText
             o.AppendLine($"confirmed: invoice line {li} {(inv != null ? "learned" : "not learned")}, total line {ti} {(tot != null ? "learned" : "not learned")}");
         }
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var first = await ReadReceiptAsync(ocr, m, inv, tot).ConfigureAwait(false);
-        long t1 = sw.ElapsedMilliseconds;
-        var second = await ReadReceiptAsync(ocr, m.Scale2x(), inv, tot).ConfigureAwait(false);
-        long t2 = sw.ElapsedMilliseconds - t1;
+        var (first, second) = await ReadTwiceAsync(ocr, m, inv, tot).ConfigureAwait(false);
+        long t1 = sw.ElapsedMilliseconds, t2 = 0;
         if (first == null || second == null) { o.AppendLine("ocr unavailable"); return (o.ToString(), false); }
         var a = ReceiptExtractor.Extract(first, inv, tot, ocr: true);
         var b = ReceiptExtractor.Extract(second, inv, tot, ocr: true);

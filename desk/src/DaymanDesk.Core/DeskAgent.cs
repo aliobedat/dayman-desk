@@ -313,8 +313,7 @@ public sealed class DeskAgent
         var tot = c.FieldsConfirmed ? c.LearnedTotal : null;
         try
         {
-            first = await OcrText.ReadReceiptAsync(_ocr, bmp, inv, tot).ConfigureAwait(false);
-            second = first == null ? null : await OcrText.ReadReceiptAsync(_ocr, bmp.Scale2x(), inv, tot).ConfigureAwait(false);
+            (first, second) = await OcrText.ReadTwiceAsync(_ocr, bmp, inv, tot).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

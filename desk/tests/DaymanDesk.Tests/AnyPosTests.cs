@@ -193,6 +193,24 @@ public static class AnyPosTests
         Assert.Equal(2, ocr.Seen.Count, "two page reads");
     }
 
+    /// <summary>WO-111: the 2x page loses the total; the two lines read again at 2x confirm it, or refuse a different value.</summary>
+    public static async Task TestTwoxPageLossCheckedOnItsLines()
+    {
+        var m = new MonoBitmap(576, 100);
+        foreach (var (lineTotal, agree) in new[] { ("3.50", true), ("8.50", false) })
+        {
+            var ocr = new FakeOcr
+            {
+                Read = b => b.Width == 576 ? new[] { "رقم الفاتورة 64", "المجموع الكلي 3.50" } : new[] { "رقم الفاتورة 64" },
+                ReadLine = (crop, chars) => crop.Width == 576 ? null : chars.Contains('#') ? "64" : lineTotal,
+            };
+            var (first, second) = await OcrText.ReadTwiceAsync(ocr, m, null, null);
+            var a = ReceiptExtractor.Extract(first!, ocr: true);
+            var b = ReceiptExtractor.Extract(second!, ocr: true);
+            Assert.Equal(agree, ReceiptExtractor.SameRead(a, b), "reads agree when the 2x lines say " + lineTotal);
+        }
+    }
+
     public static async Task TestEachPrinterHasItsOwnListenerAndQrGoesToIt()
     {
         var q = new FakeQueue();
