@@ -72,7 +72,11 @@ public static class DeskSigner
         string.Join(" ", invoice.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries));
 
     /// <summary>Days since 1970-01-01 of the local (Amman) date of <paramref name="at"/>.</summary>
-    public static int Day(DateTimeOffset at) => (int)(new DateTime(at.Year, at.Month, at.Day) - new DateTime(1970, 1, 1)).TotalDays;
+    public static int Day(DateTimeOffset at)
+    {
+        at = at.ToOffset(Amman.Offset);
+        return (int)(new DateTime(at.Year, at.Month, at.Day) - new DateTime(1970, 1, 1)).TotalDays;
+    }
 
     /// <summary>Big-endian: version 1, deviceNumber (2), seq (4), amount in fils (4), print day (2), invoice UTF-8.</summary>
     public static byte[] Payload(int deviceNumber, uint seq, long fils, int day, string invoice)
@@ -110,4 +114,15 @@ public static class DeskSigner
         s = s.Replace('-', '+').Replace('_', '/');
         return Convert.FromBase64String(s + new string('=', (4 - s.Length % 4) % 4));
     }
+}
+
+/// <summary>
+/// WO-103: Amman time is UTC+3 all year since October 2022. Old Windows 7 time-zone data still moves Amman to UTC+2
+/// in winter, so every Amman day or time (print day, invoice day, the log, the window) comes from UTC, never from
+/// the Windows time zone.
+/// </summary>
+public static class Amman
+{
+    public static readonly TimeSpan Offset = TimeSpan.FromHours(3);
+    public static DateTimeOffset Now => DateTimeOffset.UtcNow.ToOffset(Offset);
 }

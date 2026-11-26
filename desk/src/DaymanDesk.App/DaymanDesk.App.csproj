@@ -12,7 +12,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DaymanDesk</AssemblyName>
     <RootNamespace>DaymanDesk.App</RootNamespace>
-    <Version>2.4.0</Version>
+    <Version>2.5.0</Version>
     <Product>دايماً ديسك</Product>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
@@ -46,6 +46,8 @@
     <EmbeddedResource Include="fonts\*.ttf" LogicalName="fonts/%(Filename)%(Extension)" />
     <EmbeddedResource Include="fonts\OFL.txt" LogicalName="fonts/OFL.txt" Condition="Exists('fonts\OFL.txt')" />
     <EmbeddedResource Include="tessdata\*.traineddata" LogicalName="ocr/tessdata/%(Filename)%(Extension)" />
+    <!-- WO-103: ISRG Root X1, added to LocalMachine\Root when missing (Program.EnsureIsrgRootX1). -->
+    <EmbeddedResource Include="..\..\setup\isrg-root-x1.der" LogicalName="certs/isrg-root-x1.der" />
   </ItemGroup>
 
 </Project>

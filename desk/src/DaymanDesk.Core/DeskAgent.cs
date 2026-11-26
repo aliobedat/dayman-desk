@@ -160,7 +160,7 @@ public sealed class DeskAgent
         Func<long, byte[], bool> printIfCurrent, string appVersion, Func<DateTimeOffset>? now = null, IOcr? ocr = null)
     {
         _cfg = cfg; _api = api; _queue = queue; _log = log; _printIfCurrent = printIfCurrent;
-        _version = appVersion; _now = now ?? (() => DateTimeOffset.Now); _ocr = ocr;
+        _version = appVersion; _now = now ?? (() => Amman.Now); _ocr = ocr;
     }
 
     public static string KindWire(ReceiptKind k) => k switch { ReceiptKind.Text => "text", ReceiptKind.Image => "image", _ => "unknown" };
@@ -405,7 +405,7 @@ public sealed class DeskAgent
         string? poolCode = signedToken == null && cfg.QrEnabled && inRange ? TakeCode(invoiceKey) : null;
         var req = new ReceiptRequest(
             Guid.NewGuid().ToString(), ext.InvoiceNo, ext.Total.Value.ToString("0.000", CultureInfo.InvariantCulture),
-            _now().ToString("yyyy-MM-dd'T'HH:mm:sszzz", CultureInfo.InvariantCulture), KindWire(analysis.Kind), poolCode,
+            _now().UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture), KindWire(analysis.Kind), poolCode,
             signedToken == null ? null : DeskSigner.SeqOf(signedToken));
         if (signedToken != null || poolCode != null)
         {
@@ -768,7 +768,7 @@ public sealed class DeskAgent
             TotalLine = tot,
             InvoiceNo = inv >= 0 ? ext!.InvoiceNo : null,
             Total = tot >= 0 ? ext!.Total : null,
-            At = DateTimeOffset.Now,
+            At = Amman.Now,
             FromImage = fromImage,
             OcrLanguage = ocrLanguage,
         };

@@ -25,7 +25,7 @@ public sealed class RollingLog
 
     public void Write(string level, string message)
     {
-        string line = DateTimeOffset.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", System.Globalization.CultureInfo.InvariantCulture) + $" {level} {message.Replace('\n', ' ').Replace('\r', ' ')}";
+        string line = Amman.Now.ToString("yyyy-MM-dd HH:mm:ss.fff zzz", System.Globalization.CultureInfo.InvariantCulture) + $" {level} {message.Replace('\n', ' ').Replace('\r', ' ')}";
         lock (_lock)
         {
             try

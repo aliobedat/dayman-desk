@@ -12,7 +12,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # WO-103: pinned; VS 2026 (MSVC 14.50+) on newer images no longer targets Windows 7.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
@@ -64,15 +65,19 @@ jobs:
           foreach ($a in "x64", "x86") {
             $dst = "desk/src/DaymanDesk.App/vcrt/$a"
             New-Item -ItemType Directory -Force $dst | Out-Null
-            # Prefer the VS 2022 (VC143) runtime: newer ones may drop Windows 7.
+            # Only the VS 2022 (VC143) runtime: the VS 2026 one (14.50+) drops Windows 7.
             $crt = @(Get-ChildItem "$vs\VC\Redist\MSVC\*\$a\Microsoft.VC143.CRT" -Directory -ErrorAction SilentlyContinue) | Sort-Object FullName | Select-Object -Last 1
-            if (-not $crt) { $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\$a\Microsoft.VC14*.CRT" -Directory | Sort-Object FullName | Select-Object -Last 1 }
-            if (-not $crt) { throw "no VC++ redist for $a" }
+            if (-not $crt) { throw "no VC143 redist for $a" }
             foreach ($f in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll") { if (Test-Path "$($crt.FullName)\$f") { Copy-Item "$($crt.FullName)\$f" $dst } }
-            $ucrt = @(Get-ChildItem "$kits\*\ucrt\DLLs\$a", "$kits\ucrt\DLLs\$a" -Directory -ErrorAction SilentlyContinue) | Sort-Object FullName | Select-Object -Last 1
-            if (-not $ucrt) { throw "no UCRT redist for $a" }
+            # WO-103: the app-local UCRT from an older SDK (10.0.26100 is not promised to run on Windows 7).
+            $ucrt = @("10.0.19041.0", "10.0.22621.0", "10.0.17763.0" | ForEach-Object { "$kits\$_\ucrt\DLLs\$a" } | Where-Object { Test-Path $_ }) | Select-Object -First 1
+            if (-not $ucrt) { Get-ChildItem $kits -Directory | ForEach-Object { Write-Host "  SDK redist $($_.Name)" }; throw "no Windows 7 UCRT redist (19041, 22621, 17763) for $a" }
+            $ucrt = Get-Item $ucrt
             Copy-Item "$($ucrt.FullName)\*.dll" $dst
             if (-not (Test-Path "$dst\ucrtbase.dll") -or -not (Test-Path "$dst\vcruntime140.dll")) { throw "runtime incomplete for $a" }
+            $vc = (Get-Item "$dst\vcruntime140.dll").VersionInfo
+            if ($vc.FileMajorPart -ne 14 -or $vc.FileMinorPart -ge 50) { throw "VC runtime $($vc.FileVersion) drops Windows 7" }
+            Write-Host "$a : vcruntime140 $($vc.FileVersion), ucrtbase $((Get-Item "$dst\ucrtbase.dll").VersionInfo.FileVersion)"
             Write-Host "$a : $($crt.FullName) + $($ucrt.FullName), $((Get-ChildItem $dst).Count) files"
           }
 
@@ -176,6 +181,63 @@ jobs:
           "sha=$h" >> $env:GITHUB_OUTPUT
           Write-Host "DaymanDesk $v  sha256 $h"
 
+      # WO-103: DaymanDeskSetup.exe, the one download for shops: native (MSVC, static CRT, x86, no runtime needed),
+      # embedding this exact DaymanDesk.exe (the one released next to its .sig). See desk/setup/setup.cpp.
+      - name: Setup build environment
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vi = (Get-Item desk/publish/DaymanDesk.exe).VersionInfo
+          "DESK_VCVARS=$vs\VC\Auxiliary\Build\vcvarsall.bat" >> $env:GITHUB_ENV
+          # VS 2026 (MSVC 14.5x) dropped Windows 7 targeting: build with the VS 2022 toolset (14.4x) when it is installed.
+          $tools = @(Get-ChildItem "$vs\VC\Tools\MSVC" -Directory | Select-Object -ExpandProperty Name)
+          Write-Host "MSVC toolsets: $($tools -join ', ')"
+          $v143 = $tools | Where-Object { $_ -like '14.4*' -or $_ -like '14.3*' } | Sort-Object { [version]$_ } | Select-Object -Last 1
+          if (-not $v143) { throw "no MSVC 14.3x/14.4x toolset: 14.50+ drops Windows 7" }
+          "DESK_VCVER=-vcvars_ver=$v143" >> $env:GITHUB_ENV
+          "DESK_DEFS=/DDESK_V1=$($vi.FileMajorPart) /DDESK_V2=$($vi.FileMinorPart) /DDESK_V3=$($vi.FileBuildPart) /DDESK_V4=$($vi.FilePrivatePart)" >> $env:GITHUB_ENV
+
+      - name: Build DaymanDeskSetup.exe
+        shell: cmd
+        working-directory: desk/setup
+        run: |
+          call "%DESK_VCVARS%" x86 %DESK_VCVER% >nul || exit /b 1
+          cl /c /O1 /MT /GS /W4 /utf-8 /DUNICODE /D_UNICODE %DESK_DEFS% setup.cpp || exit /b 1
+          rc /nologo /fo setup.res setup.rc || exit /b 1
+          link /nologo /OUT:..\publish\DaymanDeskSetup.exe /SUBSYSTEM:WINDOWS,6.00 /MANIFEST:NO /DYNAMICBASE /NXCOMPAT setup.obj setup.res winhttp.lib wintrust.lib crypt32.lib comctl32.lib shell32.lib advapi32.lib user32.lib gdi32.lib version.lib delayimp.lib /DELAYLOAD:version.dll /DELAYLOAD:winhttp.dll /DELAYLOAD:wintrust.dll /DELAYLOAD:crypt32.dll || exit /b 1
+          rem Windows 7 has no api-ms-win-* DLLs and none of these Windows 8+ functions: a static import of one would stop the setup there.
+          dumpbin /nologo /imports ..\publish\DaymanDeskSetup.exe > imports.txt || exit /b 1
+          findstr /i /r "^ *[a-z0-9_-]*\.dll" imports.txt
+          findstr /i "api-ms-win GetSystemTimePreciseAsFileTime CreateFile2 GetCurrentPackageId WakeByAddress WaitOnAddress" imports.txt && exit /b 1
+          exit /b 0
+
+      # WO-103: a dry run on the runner (prints the plan, changes nothing), then the real .NET 4.8 download over WinHTTP
+      # and its Microsoft signature check (the runner already has 4.8, so nothing is run).
+      - name: Setup smoke run
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path desk/publish/DaymanDeskSetup.exe).Path
+          # Windows 7 refuses an exe that asks for a newer OS or subsystem version in its PE header.
+          $b = [IO.File]::ReadAllBytes($exe)
+          $opt = [BitConverter]::ToInt32($b, 0x3c) + 24
+          $os = [BitConverter]::ToUInt16($b, $opt + 40); $sub = [BitConverter]::ToUInt16($b, $opt + 48)
+          Write-Host "DaymanDeskSetup.exe $([math]::Round($b.Length / 1MB, 1)) MB, PE OS version $os.x, subsystem $sub.x"
+          if ($os -gt 6 -or $sub -gt 6) { throw "DaymanDeskSetup.exe would not start on Windows 7" }
+          foreach ($a in '--check', '--check-download') {
+            $psi = New-Object Diagnostics.ProcessStartInfo $exe, $a
+            $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true
+            $p = [Diagnostics.Process]::Start($psi)
+            $o = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+            Write-Host "== DaymanDeskSetup $a (exit $($p.ExitCode))"; Write-Host $o
+            if ($p.ExitCode -ne 0) { throw "DaymanDeskSetup $a failed" }
+            if ($o -notmatch 'install: .*embedded') { throw "DaymanDeskSetup $a printed no plan" }
+          }
+          # The embedded Microsoft root must be the very one in the runner's store; both download ways must verify.
+          if ($o -notmatch 'Microsoft Root Certificate Authority 2011: SHA-256 ok, in LocalMachine') { throw "embedded Microsoft root differs from the runner's" }
+          if ($o -notmatch 'https: ok' -or $o -notmatch 'http: ok') { throw "a .NET 4.8 download way failed" }
+          if (([regex]::Matches($o, 'signer "Microsoft Corporation" -> trusted')).Count -ne 2) { throw "the .NET 4.8 installer did not verify" }
+          if (([regex]::Matches($o, 'SHA-256 [0-9a-f]{64} -> the pinned file')).Count -ne 2) { throw "the .NET 4.8 installer is not the pinned file" }
+
       - name: Screenshots of the Arabic UI (review only)
         continue-on-error: true
         shell: pwsh
@@ -210,6 +272,7 @@ jobs:
         with:
           name: DaymanDesk
           path: |
+            desk/publish/DaymanDeskSetup.exe
             desk/publish/DaymanDesk.exe
             desk/publish/DaymanDesk.exe.sha256
             desk/publish/DaymanDesk.exe.sig
@@ -222,7 +285,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          files="desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md"
+          files="desk/publish/DaymanDeskSetup.exe desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md"
           if [ -f desk/publish/DaymanDesk.exe.sig ]; then files="$files desk/publish/DaymanDesk.exe.sig"; fi
           gh release delete desk-latest --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
           gh release create desk-latest $files \
@@ -236,7 +299,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          files="desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md"
+          files="desk/publish/DaymanDeskSetup.exe desk/publish/DaymanDesk.exe desk/publish/DaymanDesk.exe.sha256 desk/publish/REPORT.md"
           if [ -f desk/publish/DaymanDesk.exe.sig ]; then files="$files desk/publish/DaymanDesk.exe.sig"; fi
           gh release create "$GITHUB_REF_NAME" $files \
             --repo "$GITHUB_REPOSITORY" --prerelease --title "دايماً ديسك $GITHUB_REF_NAME" \

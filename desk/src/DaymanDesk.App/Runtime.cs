@@ -338,7 +338,7 @@ sealed class Runtime : IDisposable
 
     void OnJob(ForwardedJob j)
     {
-        try { Samples.Save(j.Data, DateTimeOffset.Now); }
+        try { Samples.Save(j.Data, Amman.Now); }
         catch (Exception ex) { Log.Warn("sample save: " + ex.Message); }
         _ = Agent.ProcessJobAsync(j.Data, j.ForwardMs, j.Seq, j.PrinterUnreachable, () => Server.Release(j.Seq, j.PrevSeq));
     }

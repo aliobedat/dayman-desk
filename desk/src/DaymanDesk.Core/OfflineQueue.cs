@@ -31,7 +31,7 @@ public sealed class OfflineQueue
     public OfflineQueue(string path, Func<DateTimeOffset>? now = null)
     {
         _path = path;
-        _now = now ?? (() => DateTimeOffset.Now);
+        _now = now ?? (() => Amman.Now);
         _items = Load(path);
     }
 

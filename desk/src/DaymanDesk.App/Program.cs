@@ -17,7 +17,7 @@ static class Program
         try { return _single?.WaitOne(5000) ?? false; } catch (AbandonedMutexException) { return true; }
     }
 
-    internal const string NeedsNet48 = "يحتاج دايماً ديسك إلى ‎.NET Framework 4.8. ثبّته من موقع Microsoft، ثم شغّل البرنامج مرة أخرى.";
+    internal const string NeedsNet48 = "يحتاج دايماً ديسك إلى ‎.NET Framework 4.8 (وليس 4.8.1). نزّل ملف التثبيت من daymanjo.com/desk/download وشغّله، فيثبّت 4.8 تلقائياً.";
     internal const string AlreadyRunning = "دايماً ديسك يعمل الآن. افتحه من الأيقونة بجانب الساعة.\n\nلتثبيت إصدار جديد: اختر «خروج (إرجاع الطابعة)» من الأيقونة، ثم شغّل هذا الملف مرة أخرى.";
 
     /// <summary>WO-101: a message before the main window exists, in the themed dialog (the system box if it cannot be drawn).</summary>
@@ -73,6 +73,7 @@ static class Program
 
         // WO-95: .NET Framework 4.8 on Windows 7 does not offer TLS 1.2 by default; the server accepts nothing older.
         ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        EnsureIsrgRootX1();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         // CI only: renders every tab and dialog to PNG files (no printer, no network, no Start), on a fresh temporary
@@ -146,6 +147,33 @@ static class Program
         return code;
     }
 
+    /// <summary>
+    /// WO-103: an old Windows 7 store lacks ISRG Root X1, the root of the server's certificate. When elevated, add it
+    /// from the embedded file (SHA-256 checked), as DaymanDeskSetup does. Best effort: never stops the program.
+    /// </summary>
+    static void EnsureIsrgRootX1()
+    {
+        try
+        {
+            using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
+                if (!new System.Security.Principal.WindowsPrincipal(id).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator)) return;
+            using var store = new System.Security.Cryptography.X509Certificates.X509Store(
+                System.Security.Cryptography.X509Certificates.StoreName.Root, System.Security.Cryptography.X509Certificates.StoreLocation.LocalMachine);
+            store.Open(System.Security.Cryptography.X509Certificates.OpenFlags.ReadWrite);
+            if (store.Certificates.Find(System.Security.Cryptography.X509Certificates.X509FindType.FindByThumbprint,
+                    "CABD2A79A1076A31F21D253635CB039D4329A5E8", false).Count > 0) return;
+            using var s = typeof(Program).Assembly.GetManifestResourceStream("certs/isrg-root-x1.der");
+            if (s == null) return;
+            using var ms = new MemoryStream();
+            s.CopyTo(ms);
+            var der = ms.ToArray();
+            using var sha = System.Security.Cryptography.SHA256.Create();
+            if (BitConverter.ToString(sha.ComputeHash(der)).Replace("-", "") != "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6") return;
+            store.Add(new System.Security.Cryptography.X509Certificates.X509Certificate2(der));
+        }
+        catch { }
+    }
+
     /// <summary>.NET Framework 4.8 or later (registry Release 528040+).</summary>
     static bool HasNet48()
     {
@@ -170,7 +198,7 @@ static class Program
             var (priv, spki) = DeskSigner.CreateKey();
             var dp = new DpapiProtector();
             var opened = dp.Unprotect(dp.Protect(priv)) ?? throw new InvalidOperationException("DPAPI round trip");
-            var payload = DeskSigner.Payload(1, 42, 12_500, DeskSigner.Day(DateTimeOffset.Now), "10432");
+            var payload = DeskSigner.Payload(1, 42, 12_500, DeskSigner.Day(Amman.Now), "10432");
             using var key = DeskSigner.Open(opened);
             var token = DeskSigner.Token(payload, key);
             var sig = DeskSigner.FromB64Url(token.Split('.')[1]);

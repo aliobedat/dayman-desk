@@ -26,8 +26,8 @@ static class Screenshots
             rt.Agent.SetProblem(Problems.ParseFailed);
             using var form = new MainForm(rt, startHidden: false);
             form.Show();
-            form.AddReceiptForPreview(new ReceiptRecord { At = DateTimeOffset.Now, Kind = ReceiptKind.Text, InvoiceNo = "10432", Total = 6.670m, Confidence = 0.95, Status = "QR مطبوع", Registered = true, QrPrinted = true });
-            form.AddReceiptForPreview(new ReceiptRecord { At = DateTimeOffset.Now, Kind = ReceiptKind.Image, Status = "فاتورة صورة: بلا QR" });
+            form.AddReceiptForPreview(new ReceiptRecord { At = Amman.Now, Kind = ReceiptKind.Text, InvoiceNo = "10432", Total = 6.670m, Confidence = 0.95, Status = "QR مطبوع", Registered = true, QrPrinted = true });
+            form.AddReceiptForPreview(new ReceiptRecord { At = Amman.Now, Kind = ReceiptKind.Image, Status = "فاتورة صورة: بلا QR" });
             Pump();
             var tabs = form.Controls.OfType<TabControl>().First();
             for (int i = 0; i < tabs.TabCount; i++)
@@ -68,7 +68,7 @@ static class Screenshots
             {
                 c.DeviceToken = "preview-only"; c.ShopName = "مطعم جمرة"; c.DeviceName = "كاشير 1"; c.FieldsConfirmed = false;
                 c.UpdateVersion = "2.5.0"; c.UpdateUrl = "https://daymanjo.com/desk";
-                c.StatsDay = DateTimeOffset.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                c.StatsDay = Amman.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
                 c.TodayReceipts = 37; c.TodayRegistered = 35; c.TodayQr = 34; c.TodayNotRegistered = 2;
                 c.LastProblem = null; c.LastProblemDetail = null; c.LastProblemAt = null; c.LastPrintKind = "text";
                 c.Printers.Add(new PrinterRoute { PrinterName = "XP-80C", OriginalPort = "USB001" });
@@ -84,7 +84,7 @@ static class Screenshots
             Pump();
             Save(form, Path.Combine(dir, "pair-paired.png"));
 
-            var p = new FieldConfirmation { Lines = sample, InvoiceLine = 2, TotalLine = 8, InvoiceNo = "10432", Total = 6.670m, At = DateTimeOffset.Now };
+            var p = new FieldConfirmation { Lines = sample, InvoiceLine = 2, TotalLine = 8, InvoiceNo = "10432", Total = 6.670m, At = Amman.Now };
             using var dlg = new ConfirmFieldsForm(p, (_, _) => null);
             dlg.StartPosition = FormStartPosition.Manual;
             dlg.Show();
@@ -94,7 +94,7 @@ static class Screenshots
 
             // WO-91: the field receipt of the «Generic / Text Only» driver (every Arabic letter a '.').
             var garbled = new[] { "...... ", "... ........: 1001", ".... 2.500", ".........: 2.500" };
-            var pg = new FieldConfirmation { Lines = garbled, InvoiceLine = 1, TotalLine = 3, InvoiceNo = "1001", Total = 2.500m, At = DateTimeOffset.Now };
+            var pg = new FieldConfirmation { Lines = garbled, InvoiceLine = 1, TotalLine = 3, InvoiceNo = "1001", Total = 2.500m, At = Amman.Now };
             using var dlg2 = new ConfirmFieldsForm(pg, (_, _) => null);
             dlg2.StartPosition = FormStartPosition.Manual;
             dlg2.Show();

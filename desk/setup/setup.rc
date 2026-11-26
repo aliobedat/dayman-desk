@@ -1,0 +1,10 @@
+// DaymanDeskSetup.exe resources (WO-103). Built from desk/setup by desk.yml, after desk/publish/DaymanDesk.exe.
+1 ICON "../src/DaymanDesk.App/dayman.ico"
+1 24 "setup.manifest"
+// The exact DaymanDesk.exe of this build (the one in the release next to its .sig).
+101 RCDATA "../publish/DaymanDesk.exe"
+// ISRG Root X1 and X2 (Let's Encrypt), DER; setup.cpp checks their SHA-256 before adding them.
+102 RCDATA "isrg-root-x1.der"
+103 RCDATA "isrg-root-x2.der"
+// Microsoft Root Certificate Authority 2011 (root of the .NET installer's signature), DER, SHA-256 checked.
+104 RCDATA "microsoft-root-2011.der"

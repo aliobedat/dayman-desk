@@ -6,3 +6,6 @@ src/DaymanDesk.App/tessdata/
 FodyWeavers.xsd
 src/DaymanDesk.App/vcrt/
 src/DaymanDesk.App/fonts/
+setup/*.obj
+setup/*.res
+setup/imports.txt

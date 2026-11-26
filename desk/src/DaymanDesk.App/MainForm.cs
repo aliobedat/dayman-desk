@@ -680,7 +680,7 @@ sealed class MainForm : Form
         }
 
         int q = _rt.Queue.Count;
-        string today = DateTimeOffset.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        string today = Amman.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         bool isToday = c.StatsDay == today;
         int[] vals = isToday ? new[] { c.TodayReceipts, c.TodayQr, q } : new[] { 0, 0, q };
         for (int i = 0; i < 3; i++) _today[i].Text = vals[i].ToString(CultureInfo.InvariantCulture);
@@ -702,7 +702,7 @@ sealed class MainForm : Form
         }
         else
         {
-            string at = c.LastProblemAt is { } t ? " (" + ProblemTime(t.ToLocalTime()) + ")" : "";
+            string at = c.LastProblemAt is { } t ? " (" + ProblemTime(t.ToOffset(Amman.Offset)) + ")" : "";
             _problem.Set(Glyph.Alert, Ui.Danger, Ui.DangerBg, "آخر مشكلة" + at, Problems.Describe(c.LastProblem, c.LastProblemDetail));
             string? label = null;
             Action? act = null;
@@ -756,7 +756,7 @@ sealed class MainForm : Form
     static string ProblemTime(DateTimeOffset at)
     {
         string time = "الساعة " + at.ToString("HH:mm", CultureInfo.InvariantCulture);
-        return at.Date == DateTimeOffset.Now.Date ? time : "يوم " + at.ToString("dd.MM", CultureInfo.InvariantCulture) + " " + time;
+        return at.Date == Amman.Now.Date ? time : "يوم " + at.ToString("dd.MM", CultureInfo.InvariantCulture) + " " + time;
     }
 
     void SetPill(bool on, bool paired, bool problem)
