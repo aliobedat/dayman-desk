@@ -118,6 +118,11 @@ jobs:
           Get-Content "$png.txt"
           if ($p.ExitCode -ne 0) { throw "OCR self-test failed" }
           if (-not ((Get-Content "$png.txt" -Raw) -match 'invoice 10432/10432 total 12\.5')) { throw "OCR read the wrong numbers" }
+          # WO-108: the UCRT forwarders, ucrtbase and the natives were loaded by full path, and no loader dialog can show.
+          $log = Get-Content (Join-Path $env:TEMP "dayman-ocr-selftest\desk.log") -Raw
+          if (-not ($log -match 'ocr preload: ok, (\d+) dlls')) { throw "OCR preload did not run" }
+          if ([int]$Matches[1] -lt 10) { throw "OCR preload loaded only $($Matches[1]) dlls" }
+          if (-not (Select-String -Path desk/src/DaymanDesk.App/Program.cs -SimpleMatch 'SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);' -Quiet)) { throw "SetErrorMode missing in Main" }
 
       # WO-104/105: real image receipts (raw print jobs) from a live shop. Kept outside desk/ (mirrored to a public repo);
       # absent there, so this step skips. The owner's confirmation is played first: invoice = the INV- line, total = the

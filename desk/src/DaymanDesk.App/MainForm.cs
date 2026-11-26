@@ -626,7 +626,7 @@ sealed class MainForm : Form
 
         if (on && c.Paired && c.FieldsConfirmed && !c.QrEnabled) SetHeadline("يعمل: تُسجَّل الفواتير بلا QR (أوقف صاحب المحل QR من لوحة التحكم).", Ui.Warning);
         else if (on && c.Paired && c.FieldsConfirmed && c.LastPrintKind == "image" && c.LastProblem == Problems.OcrUnavailable)
-            SetHeadline("يعمل، لكن قراءة فواتير الصورة غير مثبّتة: بلا QR. انظر «آخر مشكلة».", Ui.Warning);
+            SetHeadline("يعمل، لكن قراءة صور الفواتير غير متاحة على هذا الجهاز: بلا QR. انظر «آخر مشكلة».", Ui.Warning);
         else if (on && c.Paired && c.FieldsConfirmed) SetHeadline("يعمل: كل فاتورة تمر عبر دايماً ديسك ويُطبع لها QR.", Ui.Success);
         else if (on && c.Paired) SetHeadline("يعمل: " + DeskAgent.AwaitingOwner + ".", Ui.Warning);
         else if (on) SetHeadline("يعمل بلا ربط: تُطبع الفواتير كالمعتاد بلا QR. اربط الجهاز من تبويب «الربط».", Ui.Warning);

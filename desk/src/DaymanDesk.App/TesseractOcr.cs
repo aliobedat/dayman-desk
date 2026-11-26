@@ -71,7 +71,9 @@ sealed class TesseractOcr : IOcr, IDisposable
             Extract();
             TesseractEnviornment.CustomSearchPath = Dir;
             // The VC++ runtime (and the UCRT for Windows 7) sit app-local next to the OCR natives: their loads search here.
-            SetDllDirectory(Path.Combine(Dir, Environment.Is64BitProcess ? "x64" : "x86"));
+            var native = Path.Combine(Dir, Environment.Is64BitProcess ? "x64" : "x86");
+            SetDllDirectory(native);
+            if (ForcePreload || !Win10OrLater()) Preload(native);
             _engine = new TesseractEngine(Path.Combine(Dir, "tessdata"), Languages, EngineMode.LstmOnly);
             LanguageTag = "tesseract-" + Languages;
             _log.Info("ocr engine: tesseract " + Languages);
@@ -83,6 +85,49 @@ sealed class TesseractOcr : IOcr, IDisposable
         }
         return _engine;
     }
+
+    /// <summary>CI only (--ocr-selftest): runs the Windows 7 preload on a newer Windows too.</summary>
+    public static bool ForcePreload;
+
+    /// <summary>Windows 10+ resolves api-ms-win-crt to its own system UCRT; the app-local one is for 7 and 8.x.</summary>
+    static bool Win10OrLater() =>
+        Microsoft.Win32.Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "CurrentMajorVersionNumber", null) is int v && v >= 10;
+
+    /// <summary>
+    /// WO-108: loads the app-local UCRT and VC++ runtime, then the OCR natives, each by full path from the verified
+    /// folder, so the api-ms-win-crt forwarders bind to this ucrtbase.dll and never to an old one in System32 (Windows 7
+    /// with an early KB2999226: «Entry Point Not Found»). A ucrtbase already loaded from elsewhere, or any failed load,
+    /// makes OCR unavailable (thrown, logged by the caller).
+    /// </summary>
+    void Preload(string native)
+    {
+        if (!ForcePreload)
+        {
+            var loaded = GetModuleHandle("ucrtbase.dll");
+            if (loaded != IntPtr.Zero)
+            {
+                var sb = new System.Text.StringBuilder(1024);
+                GetModuleFileName(loaded, sb, sb.Capacity);
+                if (!string.Equals(Path.GetDirectoryName(sb.ToString()), native, StringComparison.OrdinalIgnoreCase))
+                    throw new DllNotFoundException("ucrtbase.dll already loaded from " + sb);
+            }
+        }
+        var files = Directory.GetFiles(native, "*.dll").Select(Path.GetFileName).ToList();
+        string[] order = { "ucrtbase.dll", "api-ms-win-core-*", "api-ms-win-crt-*", "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "leptonica*", "tesseract*" };
+        int n = 0;
+        foreach (var pat in order)
+            foreach (var f in files.Where(f => Matches(f!, pat)).OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                if (LoadLibraryW(Path.Combine(native, f!)) == IntPtr.Zero)
+                    throw new DllNotFoundException(f + ": " + new System.ComponentModel.Win32Exception().Message);
+                n++;
+            }
+        _log.Info("ocr preload: ok, " + n + " dlls by full path");
+    }
+
+    static bool Matches(string file, string pat) => pat.EndsWith("*", StringComparison.Ordinal)
+        ? file.StartsWith(pat.Substring(0, pat.Length - 1), StringComparison.OrdinalIgnoreCase)
+        : string.Equals(file, pat, StringComparison.OrdinalIgnoreCase);
 
     public async Task<IReadOnlyList<OcrLine>?> ReadAsync(MonoBitmap image)
     {
@@ -167,4 +212,13 @@ sealed class TesseractOcr : IOcr, IDisposable
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     static extern bool SetDllDirectory(string path);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr LoadLibraryW(string path);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern IntPtr GetModuleHandle(string name);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    static extern int GetModuleFileName(IntPtr module, System.Text.StringBuilder path, int size);
 }

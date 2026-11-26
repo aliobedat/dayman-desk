@@ -431,7 +431,7 @@ public sealed class DeskAgent
                     await ReportUnknownFormatAsync("escpos-raster-undecodable", analysis.Reason, job).ConfigureAwait(false);
                     break;
                 case ImageRead.NoEngine:
-                    rec.Status = "فاتورة صورة: قراءة النص غير مثبّتة، بلا QR";
+                    rec.Status = "فاتورة صورة: قراءة صور الفواتير غير متاحة على هذا الجهاز، بلا QR";
                     SetProblem(Problems.OcrUnavailable);
                     await ReportAsync("warn", "other", "image receipt: no OCR engine (" + analysis.Reason + ")", job).ConfigureAwait(false);
                     break;

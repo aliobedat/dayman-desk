@@ -35,9 +35,16 @@ static class Program
         }
     }
 
+    const uint SEM_FAILCRITICALERRORS = 0x0001, SEM_NOOPENFILEERRORBOX = 0x8000;
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    static extern uint SetErrorMode(uint mode);
+
     [STAThread]
     static int Main(string[] args)
     {
+        // WO-108: a failed native load (a missing DLL or entry point) returns an error and never shows a modal dialog.
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
         // WO-95b: on an older .NET Framework 4.x the exe would start and fail later; say what is missing instead.
         if (!HasNet48())
         {
@@ -133,6 +140,7 @@ static class Program
             }
             if (m == null) throw new InvalidDataException("no raster image in the job");
             var log = new RollingLog(Path.Combine(Path.GetTempPath(), "dayman-ocr-selftest"));
+            TesseractOcr.ForcePreload = true; // WO-108: CI runs the Windows 7 preload
             using var ocr = new TesseractOcr(log, Installer.LockDataDir(log));
             // WO-105: the shared self-test (OcrText.SelfTestAsync) logs each read's invoice and total.
             var (report, ok) = OcrText.SelfTestAsync(ocr, m, invoiceHint, totalHint).GetAwaiter().GetResult();
