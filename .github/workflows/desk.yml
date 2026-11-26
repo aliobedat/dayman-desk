@@ -119,20 +119,26 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "OCR self-test failed" }
           if (-not ((Get-Content "$png.txt" -Raw) -match 'invoice 10432/10432 total 12\.5')) { throw "OCR read the wrong numbers" }
 
-      # WO-104: real image receipts (raw print jobs) from a live shop. Kept outside desk/ (mirrored to a public repo);
-      # absent there, so this step skips.
+      # WO-104/105: real image receipts (raw print jobs) from a live shop. Kept outside desk/ (mirrored to a public repo);
+      # absent there, so this step skips. The owner's confirmation is played first: invoice = the INV- line, total = the
+      # «المجموع الفرعي» line («فرعي» passed by its code points: Windows PowerShell may read this script as ANSI). Each
+      # fixture logs both reads' invoice and total; a receipt must give its own INV number and total in both reads.
       - name: OCR self-test (shop print jobs)
         shell: powershell
         run: |
           $dir = Join-Path $pwd "ci-fixtures/jmra"
           if (-not (Test-Path $dir)) { Write-Host "ci-fixtures absent: skipped"; exit 0 }
-          $want = @{ 'receipt-6.bin' = 'invoice INV-20261126-00006/INV-20261126-00006 total 1\.50*/1\.50*\s'; 'receipt-5.bin' = 'invoice INV-20261126-0000\d/INV-20261126-0000\d total 1\.50*/1\.50*\s'; 'kitchen.bin' = 'receipt no/no' }
+          $sub = -join [char[]](0x0641, 0x0631, 0x0639, 0x064A)
+          function Rx($n, $t) { "invoice INV-20261126-0000$n/INV-20261126-0000$n total $t/$t agree yes(?s).*receipt yes/yes" }
+          $want = @{
+            'receipt-5.bin' = (Rx 5 '1\.50*'); 'receipt-6.bin' = (Rx 6 '1\.50*'); 'receipt-7.bin' = (Rx 7 '2\.50*'); 'receipt-9.bin' = (Rx 9 '1\.250*')
+            'kitchen.bin' = 'receipt no/no'; 'kitchen-7.bin' = 'receipt no/no'; 'kitchen-9.bin' = 'receipt no/no'
+          }
           $failed = $false
-          foreach ($f in $want.Keys) {
+          foreach ($f in ($want.Keys | Sort-Object)) {
             $job = Join-Path $dir $f
-            # The owner confirmed the invoice line (INV-...) and the total line: played first, as in the shop.
-            $p = Start-Process desk/publish/DaymanDesk.exe -ArgumentList '--ocr-selftest', "`"$job`"", 'INV-' -PassThru -Wait
-            $txt = Get-Content "$job.txt" -Raw
+            $p = Start-Process desk/publish/DaymanDesk.exe -ArgumentList '--ocr-selftest', "`"$job`"", 'INV-', $sub -PassThru -Wait
+            $txt = Get-Content "$job.txt" -Raw -Encoding UTF8
             Write-Host "== $f (exit $($p.ExitCode))"; Write-Host $txt
             if ($p.ExitCode -ne 0 -or -not ($txt -match $want[$f])) { Write-Host "FAILED: $f"; $failed = $true }
           }

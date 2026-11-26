@@ -106,7 +106,7 @@ public static class ReceiptExtractor
     public static ExtractResult Extract(IReadOnlyList<string> rawLines, LearnedField? learnedInvoice = null, LearnedField? learnedTotal = null, bool ocr = false)
     {
         var lines = rawLines.Select(l => new Line(l)).ToList();
-        var inv = learnedInvoice != null ? ApplyInvoice(lines, learnedInvoice) : (null, 0, null);
+        var inv = learnedInvoice != null ? ApplyInvoice(lines, learnedInvoice, ocr) : (null, 0, null);
         if (inv.value == null)
         {
             inv = FindInvoice(lines);
@@ -304,14 +304,39 @@ public static class ReceiptExtractor
         return (ordered, Math.Abs(Pos(hit) - f.Position) <= ShapeDrift && neighbor == f.Neighbor);
     }
 
-    /// <summary>The lines whose label is the learned one, closest to the learned position first.</summary>
-    static IEnumerable<int> Matches(List<Line> lines, LearnedField f, bool fromBottom)
+    /// <summary>
+    /// The lines whose label is the learned one, closest to the learned position first. WO-105, OCR only: without an
+    /// exact match, a label one OCR letter off («الفاثوره», «المجموعح الفرعي»; 1 edit per 7 letters) matches too.
+    /// </summary>
+    static IEnumerable<int> Matches(List<Line> lines, LearnedField f, bool fromBottom, bool ocr = false)
     {
         var hits = new List<int>();
         // LabelKey again: a label saved before a LabelKey change (e.g. with "pm" in it) still matches.
         var label = LabelKey(f.Label);
         for (int i = 0; i < lines.Count; i++) if (lines[i].Key == label) hits.Add(i);
+        if (hits.Count == 0 && ocr && label.Length >= 6)
+        {
+            int max = Math.Max(1, label.Length / 7);
+            for (int i = 0; i < lines.Count; i++) if (Edits(lines[i].Key, label, max) <= max) hits.Add(i);
+        }
         return hits.OrderBy(i => Math.Abs((fromBottom ? lines.Count - 1 - i : i) - f.Position));
+    }
+
+    /// <summary>Levenshtein distance, or more than max as soon as it is certain.</summary>
+    static int Edits(string a, string b, int max)
+    {
+        if (Math.Abs(a.Length - b.Length) > max) return max + 1;
+        var prev = new int[b.Length + 1];
+        var cur = new int[b.Length + 1];
+        for (int j = 0; j <= b.Length; j++) prev[j] = j;
+        for (int i = 1; i <= a.Length; i++)
+        {
+            cur[0] = i;
+            for (int j = 1; j <= b.Length; j++)
+                cur[j] = Math.Min(Math.Min(cur[j - 1] + 1, prev[j] + 1), prev[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1));
+            (prev, cur) = (cur, prev);
+        }
+        return prev[b.Length];
     }
 
     /// <summary>
@@ -328,7 +353,7 @@ public static class ReceiptExtractor
         {
             if (f == null) return;
             var hits = !string.IsNullOrEmpty(f.Shape) ? ShapeMatches(lines, f, fromBottom).hits
-                : !string.IsNullOrEmpty(f.Label) ? Matches(lines, f, fromBottom) : Enumerable.Empty<int>();
+                : !string.IsNullOrEmpty(f.Label) ? Matches(lines, f, fromBottom, ocr: true) : Enumerable.Empty<int>();
             foreach (int i in hits) if ((f.ValueOnNextLine ? i + 1 : i) < lines.Count) set.Add(f.ValueOnNextLine ? i + 1 : i);
         }
         Learned(inv, learnedInvoice, false);
@@ -350,7 +375,20 @@ public static class ReceiptExtractor
         return (inv, tot);
     }
 
-    static readonly Regex DecimalRx = new(@"\d+[.,]\d{1,3}(?![\d.,])", RegexOptions.Compiled);
+    /// <summary>
+    /// WO-105: the two OCR reads of an image receipt agree: both found an invoice number and a total, the invoice numbers
+    /// equal once trimmed of edge punctuation and direction marks, the totals equal to 3 decimals.
+    /// </summary>
+    public static bool SameRead(ExtractResult a, ExtractResult b) =>
+        a.InvoiceNo != null && a.Total != null && b.InvoiceNo != null && b.Total != null
+        && string.Equals(CleanInvoice(a.InvoiceNo), CleanInvoice(b.InvoiceNo), StringComparison.Ordinal) && CleanInvoice(a.InvoiceNo).Length > 0
+        && Math.Round(a.Total.Value, 3) == Math.Round(b.Total.Value, 3);
+
+    /// <summary>The invoice number as sent: edge punctuation and direction marks trimmed.</summary>
+    public static string CleanInvoice(string s) =>
+        new string(s.Where(c => !TextNormalizer.IsBidiMark(c)).ToArray()).Trim().Trim('.', ',', ':', ';', '-', '_', '/', '#');
+
+    static readonly Regex DecimalRx =new(@"\d+[.,]\d{1,3}(?![\d.,])", RegexOptions.Compiled);
 
     /// <summary>
     /// WO-104: a page line completed by its own line read, only where the page lost the value (a read that was fine is
@@ -373,7 +411,7 @@ public static class ReceiptExtractor
         return best == null ? page : page + " " + best;
     }
 
-    static (string? value, double conf, string? line) ApplyInvoice(List<Line> lines, LearnedField f)
+    static (string? value, double conf, string? line) ApplyInvoice(List<Line> lines, LearnedField f, bool ocr)
     {
         if (!string.IsNullOrEmpty(f.Shape))
         {
@@ -390,7 +428,7 @@ public static class ReceiptExtractor
             return (null, 0, null);
         }
         if (string.IsNullOrEmpty(f.Label)) return (null, 0, null);
-        foreach (int i in Matches(lines, f, fromBottom: false))
+        foreach (int i in Matches(lines, f, fromBottom: false, ocr))
         {
             int vi = f.ValueOnNextLine ? i + 1 : i;
             if (vi >= lines.Count) continue;
@@ -417,7 +455,7 @@ public static class ReceiptExtractor
             return (null, 0, null);
         }
         if (string.IsNullOrEmpty(f.Label)) return (null, 0, null);
-        foreach (int i in Matches(lines, f, fromBottom: true))
+        foreach (int i in Matches(lines, f, fromBottom: true, ocr))
         {
             int vi = f.ValueOnNextLine ? i + 1 : i;
             if (vi >= lines.Count) continue;

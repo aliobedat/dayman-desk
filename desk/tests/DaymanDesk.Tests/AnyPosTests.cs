@@ -19,9 +19,12 @@ public static class AnyPosTests
     {
         public readonly ConcurrentQueue<(string queue, byte[] data, string doc)> Writes = new();
         public bool Fail;
+        /// <summary>WO-105: how long writing a QR slip takes (a job arriving meanwhile must wait for it).</summary>
+        public int SlowSlipMs;
         public void Write(string queue, byte[] data, string docName)
         {
             if (Fail) throw new IOException("queue paused");
+            if (docName == "Dayman QR" && SlowSlipMs > 0) Thread.Sleep(SlowSlipMs);
             Writes.Enqueue((queue, data, docName));
         }
         public List<byte[]> To(string queue) => Writes.Where(w => w.queue == queue).Select(w => w.data).ToList();
@@ -66,11 +69,14 @@ public static class AnyPosTests
         public Func<MonoBitmap, IReadOnlyList<string>?> Read = _ => null;
         public readonly List<MonoBitmap> Seen = new();
         public Func<MonoBitmap, string, string?> ReadLine = (_, _) => null;
-        public Task<IReadOnlyList<OcrLine>?> ReadAsync(MonoBitmap image)
+        /// <summary>WO-105: how long one page read takes.</summary>
+        public int DelayMs;
+        public async Task<IReadOnlyList<OcrLine>?> ReadAsync(MonoBitmap image)
         {
-            Seen.Add(image);
+            lock (Seen) Seen.Add(image);
+            if (DelayMs > 0) await Task.Delay(DelayMs);
             var r = Read(image);
-            return Task.FromResult(r == null ? null : (IReadOnlyList<OcrLine>)r.Select((t, i) => new OcrLine(t, i * 10, i * 10 + 8)).ToList());
+            return r == null ? null : (IReadOnlyList<OcrLine>)r.Select((t, i) => new OcrLine(t, i * 10, i * 10 + 8)).ToList();
         }
         public Task<string?> ReadLineAsync(MonoBitmap crop, string allowedChars) => Task.FromResult(ReadLine(crop, allowedChars));
         public string? LanguageTag { get; set; }
@@ -661,6 +667,124 @@ public static class AnyPosTests
         Assert.Equal("10432", doc.RootElement.GetProperty("invoiceNo").GetString(), "invoice");
         Assert.Equal("6.670", doc.RootElement.GetProperty("amount").GetString(), "amount");
         Assert.Equal(1, rig.Cfg.Current.TodayQr, "counted");
+    }
+
+    // ---------- WO-105: image receipts print a pool QR before the OCR ----------
+
+    const string PoolBase = "https://daymanjo.com/c/shop/s/";
+    static readonly string[] KitchenOcr = { "JMRA", "تذكرة المطبخ", "رقم الطلب: INV-20261126-00009", "Onion Rings 1" };
+
+    /// <summary>A rig with a pool, whose /receipt answers the code it was sent; receipts are 400 rows, kitchen tickets 150.</summary>
+    static Rig PoolRig(int learnedHeight, params string[] pool)
+    {
+        var rig = new Rig();
+        rig.Cfg.Update(c =>
+        {
+            c.CodePool = pool.Select(x => new PoolCode { Code = x, Until = rig.Now + DeskAgent.PoolLifetime }).ToList();
+            c.ClaimBase = PoolBase;
+            c.ImageReceiptMinHeight = learnedHeight;
+            c.ImageOtherMaxHeight = learnedHeight > 0 ? 150 : 0;
+        });
+        rig.Ocr.Read = b => b.Height % 400 == 0 ? OcrReceipt : KitchenOcr;
+        rig.Http.Respond = (r, body) =>
+        {
+            if (!r.RequestUri!.AbsolutePath.EndsWith("/receipt")) return new HttpResponseMessage(HttpStatusCode.NoContent);
+            using var d = JsonDocument.Parse(body);
+            var code = d.RootElement.TryGetProperty("code", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : "SRVRC0DE11";
+            return FakeHandler.Json(200, $"{{\"code\":\"{code}\",\"claimUrl\":\"{PoolBase}{code}\",\"expiresAt\":\"x\",\"already\":false}}");
+        };
+        return rig;
+    }
+
+    static bool HasUrl(byte[] b, string url) => Convert.ToHexString(b).Contains(Convert.ToHexString(Encoding.ASCII.GetBytes(url)));
+
+    /// <summary>
+    /// The live Jamra case on one printer: a receipt, then 300 ms later its kitchen ticket, while the OCR takes 1.5 s per
+    /// read and writing the slip takes 400 ms. The slip goes right after the receipt; the kitchen ticket, arriving while
+    /// the slip is written, waits for it and prints after it; the pool code is then bound to the receipt.
+    /// </summary>
+    public static async Task TestImageReceiptPrintsPoolQrBeforeTheNextJob()
+    {
+        var q = new FakeQueue { SlowSlipMs = 400 };
+        var server = new PassThroughServer(q, new RollingLog(Tmp.Dir()), (_, _) => { });
+        var rig = PoolRig(400, "K7Q2M9XP0A", "K7Q2M9XP0B");
+        rig.Ocr.DelayMs = 1500;
+        rig.PrintIfCurrent = server.PrintIfCurrent;
+        var done = new ConcurrentQueue<Task<ReceiptRecord>>();
+        server.JobForwarded += j => done.Enqueue(rig.Agent.ProcessJobAsync(j.Data, j.ForwardMs, j.Seq, j.PrinterUnreachable));
+        var a = Win("POS-80", FreePort());
+        server.Start(a);
+        try
+        {
+            var receipt = Receipts.Raster();
+            var kitchen = Receipts.Raster(150);
+            Send(a.ListenPort, receipt);
+            await Task.Delay(300);
+            Send(a.ListenPort, kitchen);
+            await Until(() => done.Count == 2, "both processed");
+            var recs = await Within(Task.WhenAll(done), 20_000);
+            var printed = q.To(DeskConfig.RawQueueFor("POS-80"));
+            Assert.Equal(3, printed.Count, "receipt, slip, kitchen ticket");
+            Assert.True(printed[0].SequenceEqual(receipt), "the receipt first, untouched");
+            Assert.True(HasUrl(printed[1], PoolBase + "K7Q2M9XP0A"), "then the pool slip");
+            Assert.True(printed[2].SequenceEqual(kitchen), "the kitchen ticket after the slip");
+            var rec = recs.Single(r => !r.NonReceipt);
+            Assert.True(rec.QrPrinted && rec.Registered, rec.Status);
+            Assert.True(recs.Single(r => r.NonReceipt).Status.Contains("ليست فاتورة"), "kitchen ticket: no QR");
+            using var doc = JsonDocument.Parse(rig.Calls("/receipt").Single());
+            Assert.Equal("K7Q2M9XP0A", doc.RootElement.GetProperty("code").GetString(), "binds the printed code");
+            Assert.Equal("10432", doc.RootElement.GetProperty("invoiceNo").GetString(), "invoice from the OCR");
+            Assert.Equal("6.670", doc.RootElement.GetProperty("amount").GetString(), "amount from the OCR");
+            Assert.Equal("K7Q2M9XP0A", rig.Cfg.Current.PrintedCodes["2026-11-20|10432"], "remembered for a reprint");
+        }
+        finally { server.StopAll(); }
+    }
+
+    /// <summary>Heights are learned from the OCR; before that, or with an empty pool, image receipts go as before.</summary>
+    public static async Task TestImageReceiptHeightsLearnedAndFallback()
+    {
+        var rig = PoolRig(0, "K7Q2M9XP0A");
+        var first = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);
+        Assert.True(first.QrPrinted && first.Registered, first.Status);
+        Assert.Equal(1, rig.Printed.Count, "one slip, after the OCR (nothing learned yet)");
+        Assert.Equal(400, rig.Cfg.Current.ImageReceiptMinHeight, "receipt height learned");
+        var k = await rig.Agent.ProcessJobAsync(Receipts.Raster(150), 5, 2);
+        Assert.True(k.NonReceipt && rig.Printed.Count == 1, "kitchen ticket: no slip");
+        Assert.Equal(150, rig.Cfg.Current.ImageOtherMaxHeight, "non-receipt height learned");
+        // A kitchen ticket that is not taller than the receipts gets no slip before the OCR.
+        rig.Cfg.Update(c => c.CodePool = new() { new PoolCode { Code = "K7Q2M9XP0B", Until = rig.Now + DeskAgent.PoolLifetime } });
+        await rig.Agent.ProcessJobAsync(Receipts.Raster(150), 5, 3);
+        Assert.Equal(1, rig.Printed.Count, "still no slip");
+        // An instant slip whose OCR then fails: the code is printed, never bound, and the status says so.
+        rig.Ocr.Read = _ => new[] { "JMRA", "شكرا" };
+        var bad = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 4);
+        Assert.Equal(2, rig.Printed.Count, "slip printed before the OCR");
+        Assert.True(!bad.Registered && bad.Status.Contains("QR المطبوع لا يعمل"), bad.Status);
+        // Empty pool: as before (the receipt waits for /receipt, then prints the server's code).
+        rig.Ocr.Read = _ => OcrReceipt;
+        var later = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 5);
+        Assert.True(later.Registered && later.QrPrinted, later.Status);
+        Assert.Equal(3, rig.Printed.Count, "slip after the OCR");
+    }
+
+    /// <summary>WO-105: two OCR reads agree on normalized values; an OCR label one letter off still matches.</summary>
+    public static void TestOcrReadsCompareNormalized()
+    {
+        var a = new ExtractResult { InvoiceNo = "INV-20261126-00007", Total = 2.5m };
+        var b = new ExtractResult { InvoiceNo = "\u200fINV-20261126-00007.", Total = 2.500m };
+        Assert.True(ReceiptExtractor.SameRead(a, b), "trailing dot, RLM, 2.5 = 2.500");
+        Assert.True(!ReceiptExtractor.SameRead(a, new ExtractResult { InvoiceNo = "INV-20261126-00001", Total = 2.5m }), "another invoice");
+        Assert.True(!ReceiptExtractor.SameRead(a, new ExtractResult { InvoiceNo = "INV-20261126-00007" }), "a value only one read has");
+        var page = new[] { "INV-20261126-00009 :# الفاتورة", "رقم الطلب: 9", "المجموع الفرعي 1.25", "الإجمالي د.ا 1.25", "المدفوع: 1.25" };
+        var inv = ReceiptExtractor.LearnInvoice(page, 0)!.Value.field;
+        var tot = ReceiptExtractor.LearnTotal(page, 2)!.Value.field;
+        var other = new[] { "INV-20261126-00009 :# \u200fالفاثورة\u200e", "رقم الطلب: 9", "المجموعح الفرعي 1.25", "الإجمالي ددا 1.25", "المدفوع: 1.5" };
+        var e = ReceiptExtractor.Extract(other, inv, tot, ocr: true);
+        Assert.Equal("INV-20261126-00009", e.InvoiceNo, "invoice through the near label");
+        Assert.Equal(1.25m, e.Total, "total from المجموع الفرعي");
+        Assert.True(e.Confidence >= DeskAgent.MinConfidence, "learned confidence");
+        var text = ReceiptExtractor.Extract(other, inv, tot, ocr: false);
+        Assert.True(text.InvoiceConfidence < DeskAgent.MinConfidence, "text receipts keep the exact label");
     }
 
     /// <summary>WO-104: a large bold total the page read loses («الإجمالي 0 د.أ») is read again on its own line crop.</summary>

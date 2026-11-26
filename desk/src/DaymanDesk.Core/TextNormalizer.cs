@@ -31,7 +31,7 @@ public static class TextNormalizer
             else if (c == 'أ' || c == 'إ' || c == 'آ' || c == 'ٱ') c = 'ا'; // alef forms
             else if (c == 'ى') c = 'ي';      // alef maqsura -> yeh
             else if (c == 'ة') c = 'ه';      // teh marbuta -> heh
-            else if (c == 'ـ') continue;          // tatweel
+            else if (c == 'ـ' || IsBidiMark(c)) continue; // tatweel; WO-105: RTL/LTR marks an OCR adds to some reads only
             else if (c >= 'ً' && c <= 'ْ') continue; // harakat
             else if (c == ' ') c = ' ';
             else if (lower) c = char.ToLowerInvariant(c);
@@ -47,6 +47,10 @@ public static class TextNormalizer
         Array.Reverse(a);
         return new string(a);
     }
+
+    /// <summary>Invisible direction marks (LRM, RLM, ALM, embeddings, isolates).</summary>
+    public static bool IsBidiMark(char c) =>
+        c == '‎' || c == '‏' || c == '؜' || (c >= '‪' && c <= '‮') || (c >= '⁦' && c <= '⁩');
 
     public static bool IsArabicLetter(char c) =>
         (c >= 'ء' && c <= 'ي') || (c >= 'ﹰ' && c <= 'ﻼ') || (c >= 'ﭐ' && c <= '﷿');

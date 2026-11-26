@@ -236,12 +236,54 @@ public static class OcrText
         return lines;
     }
 
+    /// <summary>
+    /// The CI self-test of an image receipt (WO-104/105), shared by the App (Tesseract) and tests: the owner's
+    /// confirmation is played first (invoice = the first line holding invoiceHint; total = the first line holding
+    /// totalHint, else the detected total line), then the two reads run as DeskAgent runs them. Ok: both reads give the
+    /// same invoice number and total, or both say it is not a receipt.
+    /// </summary>
+    public static async Task<(string Report, bool Ok)> SelfTestAsync(IOcr ocr, MonoBitmap m, string? invoiceHint, string? totalHint)
+    {
+        var o = new StringBuilder();
+        LearnedField? inv = null, tot = null;
+        if (invoiceHint != null)
+        {
+            var seen = (await ReadReceiptAsync(ocr, m, null, null).ConfigureAwait(false) ?? Array.Empty<string>()).ToList();
+            int li = seen.FindIndex(l => l.Contains(invoiceHint));
+            int ti = totalHint != null ? seen.FindIndex(l => TextNormalizer.Normalize(l).Contains(TextNormalizer.Normalize(totalHint)))
+                : seen.IndexOf(ReceiptExtractor.Extract(seen, ocr: true).TotalLine ?? "\0");
+            inv = li >= 0 ? ReceiptExtractor.LearnInvoice(seen, li)?.field : null;
+            tot = ti >= 0 ? ReceiptExtractor.LearnTotal(seen, ti)?.field : null;
+            o.AppendLine($"confirmed: invoice line {li} {(inv != null ? "learned" : "not learned")}, total line {ti} {(tot != null ? "learned" : "not learned")}");
+        }
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var first = await ReadReceiptAsync(ocr, m, inv, tot).ConfigureAwait(false);
+        long t1 = sw.ElapsedMilliseconds;
+        var second = await ReadReceiptAsync(ocr, m.Scale2x(), inv, tot).ConfigureAwait(false);
+        long t2 = sw.ElapsedMilliseconds - t1;
+        if (first == null || second == null) { o.AppendLine("ocr unavailable"); return (o.ToString(), false); }
+        var a = ReceiptExtractor.Extract(first, inv, tot, ocr: true);
+        var b = ReceiptExtractor.Extract(second, inv, tot, ocr: true);
+        bool na = ReceiptExtractor.IsNonReceipt(first, a), nb = ReceiptExtractor.IsNonReceipt(second, b);
+        o.AppendLine("read 1 (" + t1 + " ms): " + string.Join(" | ", first));
+        o.AppendLine("read 2 (" + t2 + " ms): " + string.Join(" | ", second));
+        o.AppendLine($"read 1: invoice {a.InvoiceNo} ({a.InvoiceConfidence:0.00}) total {a.Total} ({a.TotalConfidence:0.00})");
+        o.AppendLine($"read 2: invoice {b.InvoiceNo} ({b.InvoiceConfidence:0.00}) total {b.Total} ({b.TotalConfidence:0.00})");
+        bool agree = ReceiptExtractor.SameRead(a, b);
+        o.AppendLine($"invoice {a.InvoiceNo}/{b.InvoiceNo} total {a.Total}/{b.Total} agree {(agree ? "yes" : "no")}");
+        o.AppendLine($"receipt {(na ? "no" : "yes")}/{(nb ? "no" : "yes")}");
+        // As DeskAgent registers: the first read confident, the second the same values.
+        bool ok = (na && nb) || (!na && !nb && agree && a.InvoiceConfidence >= DeskAgent.MinConfidence && a.TotalConfidence >= DeskAgent.MinConfidence);
+        return (o.ToString(), ok);
+    }
+
     static string CleanLine(string raw)
     {
         var sb = new StringBuilder(raw.Length);
         foreach (char ch in raw)
         {
             char c = ch;
+            if (TextNormalizer.IsBidiMark(c)) continue;
             if (c >= '٠' && c <= '٩') c = (char)('0' + (c - '٠'));
             else if (c >= '۰' && c <= '۹') c = (char)('0' + (c - '۰'));
             else if (c == '٫') c = '.';

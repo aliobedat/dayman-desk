@@ -182,13 +182,22 @@ public sealed class DeskAgent
         ExtractResult? ext = null;
         IReadOnlyList<string> lines;
         var image = ImageRead.NotImage;
+        int height = 0;
         bool nonReceipt = false, ocrAgree = true;
         IReadOnlyList<string> second = Array.Empty<string>();
+        Instant? instant = null;
         try
         {
             analysis = ReceiptAnalyzer.Analyze(job);
             lines = analysis.Lines;
-            if (analysis.Kind == ReceiptKind.Image) image = await ReadImageAsync(job, (a, b) => { lines = a; second = b; }).ConfigureAwait(false);
+            if (analysis.Kind == ReceiptKind.Image)
+            {
+                var bmp = _ocr == null ? null : RasterDecoder.Decode(job);
+                // WO-105: a pool QR right after the receipt, before the OCR (the next job, a kitchen ticket, comes ~1 s later).
+                if (bmp != null && !printerUnreachable) instant = PrintInstant(bmp.Height, seqAfterForward);
+                image = await ReadImageAsync(bmp, (a, b) => { lines = a; second = b; }).ConfigureAwait(false);
+                if (image == ImageRead.Read && bmp != null) height = bmp.Height;
+            }
             if (image == ImageRead.Read) CheckOcrLanguage();
             var c0 = _cfg.Current;
             if (analysis.Kind == ReceiptKind.Text || image == ImageRead.Read)
@@ -200,7 +209,15 @@ public sealed class DeskAgent
                 {
                     // OCR gives no per-digit confidence: the second read (2x upscale) must give the same two values.
                     var ext2 = ReceiptExtractor.Extract(second, c0.FieldsConfirmed ? c0.LearnedInvoice : null, c0.FieldsConfirmed ? c0.LearnedTotal : null, ocr: true);
-                    ocrAgree = ext2.InvoiceNo == ext.InvoiceNo && ext2.Total == ext.Total;
+                    // WO-105: compared normalized (edge punctuation, direction marks, amounts to 3 decimals); still mandatory.
+                    ocrAgree = ReceiptExtractor.SameRead(ext, ext2);
+                    if (ocrAgree) ext = new ExtractResult
+                    {
+                        InvoiceNo = ReceiptExtractor.CleanInvoice(ext.InvoiceNo!), Total = ext.Total, InvoiceConfidence = ext.InvoiceConfidence,
+                        TotalConfidence = ext.TotalConfidence, InvoiceLine = ext.InvoiceLine, TotalLine = ext.TotalLine,
+                    };
+                    LearnHeight(height, receipt: !nonReceipt && ocrAgree && ext.Confidence >= MinConfidence,
+                        other: nonReceipt && ReceiptExtractor.IsNonReceipt(second, ext2));
                 }
             }
             // WO-91: a drawer kick, an init or a status query sent as a print job: a few control bytes, no picture.
@@ -240,7 +257,13 @@ public sealed class DeskAgent
                     if (analysis.CodeTable != null) c.CodeTable = analysis.CodeTable;
                 }
             });
-            await HandleAsync(job, forwardMs, seqAfterForward, analysis, lines, image, ext, rec, printerUnreachable, ocrAgree, after).ConfigureAwait(false);
+            await HandleAsync(job, forwardMs, seqAfterForward, analysis, lines, image, ext, rec, printerUnreachable, ocrAgree, after, instant).ConfigureAwait(false);
+            if (instant != null && !instant.Used)
+            {
+                // The slip printed before the OCR, and this job turned out not to be a readable receipt: its code stays unbound.
+                rec.Status += " (QR المطبوع لا يعمل)";
+                _log.Warn("instant pool qr printed, not bound: " + rec.Status);
+            }
             // WO-90: after a registered receipt (never before its QR) the pool is topped up; offline the heartbeat does it.
             if (rec.Registered) await RefillPoolAsync().ConfigureAwait(false);
         }
@@ -276,10 +299,9 @@ public sealed class DeskAgent
     /// Decodes the raster to a bitmap and reads it twice with the OCR: as printed and upscaled 2x (two independent
     /// reads; a receipt registers only when both give the same invoice number and total). Never throws.
     /// </summary>
-    async Task<ImageRead> ReadImageAsync(byte[] job, Action<IReadOnlyList<string>, IReadOnlyList<string>> setLines)
+    async Task<ImageRead> ReadImageAsync(MonoBitmap? bmp, Action<IReadOnlyList<string>, IReadOnlyList<string>> setLines)
     {
         if (_ocr == null) return ImageRead.NoOcr;
-        var bmp = RasterDecoder.Decode(job);
         if (bmp == null) return ImageRead.Undecodable;
         IReadOnlyList<string>? first, second;
         // WO-104: each read also reads the confirmed invoice and total lines again on their own.
@@ -301,8 +323,61 @@ public sealed class DeskAgent
         return ImageRead.Read;
     }
 
+    /// <summary>WO-105: a pool code whose slip printed before the OCR; Used once /receipt was asked to bind it.</summary>
+    sealed class Instant
+    {
+        public Instant(string code) { Code = code; }
+        public string Code { get; }
+        public bool Used { get; set; }
+    }
+
+    /// <summary>
+    /// WO-105: for an image as tall as the receipts the OCR has seen (and taller than any picture that was not one), prints
+    /// a slip with the next pool code at once: no invoice line (the OCR has not read it yet). Null: not printed (no pool,
+    /// nothing learned yet, not paired or confirmed, QR off, or another job already came): the receipt goes as before.
+    /// </summary>
+    Instant? PrintInstant(int height, long seq)
+    {
+        var c = _cfg.Current;
+        if (!c.Paired || !c.FieldsConfirmed || !c.QrEnabled || c.ImageReceiptMinHeight <= 0
+            || height < c.ImageReceiptMinHeight || height <= c.ImageOtherMaxHeight) return null;
+        PoolCode? taken = null;
+        _cfg.Update(x =>
+        {
+            var now = _now();
+            x.CodePool.RemoveAll(p => p.Until <= now);
+            if (!ValidClaimBase(x.ClaimBase) || x.CodePool.Count == 0) return;
+            taken = x.CodePool[0];
+            x.CodePool.RemoveAt(0);
+        });
+        if (taken == null) return null;
+        c = _cfg.Current;
+        bool printed = false;
+        try { printed = _printIfCurrent(seq, QrReceipt.Build(c.ClaimBase + taken.Code, c.CodePage, c.CodeTable)); }
+        catch (ArgumentException) { _log.Error("pool slip not printable"); }
+        if (!printed)
+        {
+            _cfg.Update(x => { if (!x.CodePool.Any(p => p.Code == taken.Code)) x.CodePool.Insert(0, taken); });
+            return null;
+        }
+        _log.Info($"image receipt: pool qr printed before the ocr ({height} rows)");
+        ClearProblem(Problems.QrPrintFailed);
+        return new Instant(taken.Code);
+    }
+
+    /// <summary>WO-105: the OCR's verdict on an image teaches the heights PrintInstant goes by.</summary>
+    void LearnHeight(int height, bool receipt, bool other)
+    {
+        if (height <= 0 || !(receipt || other) || !_cfg.Current.Paired) return;
+        _cfg.Update(c =>
+        {
+            if (receipt && (c.ImageReceiptMinHeight == 0 || height < c.ImageReceiptMinHeight)) c.ImageReceiptMinHeight = height;
+            if (other && height > c.ImageOtherMaxHeight) c.ImageOtherMaxHeight = height;
+        });
+    }
+
     async Task HandleAsync(byte[] job, long forwardMs, long seq, AnalysisResult analysis, IReadOnlyList<string> lines, ImageRead image,
-        ExtractResult? ext, ReceiptRecord rec, bool printerUnreachable, bool ocrAgree, List<Func<Task>> after)
+        ExtractResult? ext, ReceiptRecord rec, bool printerUnreachable, bool ocrAgree, List<Func<Task>> after, Instant? instant = null)
     {
         var cfg = _cfg.Current;
         if (forwardMs > 300)
@@ -403,6 +478,18 @@ public sealed class DeskAgent
         // The server's amount bounds (lib/desk.ts: DELIVERY_MIN_FILS to PURCHASE_MAX_FILS): outside them no pool code
         // is printed; /receipt answers 422 and the receipt gets no QR, as before.
         bool inRange = ext.Total.Value >= MinAmount && ext.Total.Value <= MaxAmount;
+        if (instant != null)
+        {
+            // WO-105: the slip is out; bind its pool code to this receipt (queued when offline).
+            instant.Used = true;
+            if (!inRange) { rec.Status = "المبلغ خارج الحد: QR المطبوع لا يعمل"; SetProblem(Problems.OutOfRange); return; }
+            _cfg.Update(c => { if (!c.PrintedCodes.ContainsKey(invoiceKey)) c.PrintedCodes[invoiceKey] = instant.Code; });
+            var bind = new ReceiptRequest(
+                Guid.NewGuid().ToString(), ext.InvoiceNo, ext.Total.Value.ToString("0.000", CultureInfo.InvariantCulture),
+                _now().UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture), KindWire(analysis.Kind), instant.Code, null);
+            await PrePrintedAsync(bind, seq, rec, invoiceKey, analysis, ext, image, printed: true).ConfigureAwait(false);
+            return;
+        }
         // WO-95: a device whose key the server holds signs the QR itself (contract v1.3); only without one (no key yet,
         // an older server) does it take a pool code as in 1.2.
         string? signedToken = cfg.QrEnabled && inRange ? TakeSigned(invoiceKey, ext.InvoiceNo, ext.Total.Value) : null;
@@ -639,20 +726,24 @@ public sealed class DeskAgent
 
     /// <summary>The slip with a pool code printed at once; then the binding (/receipt with code), queued when offline.</summary>
     async Task PrePrintedAsync(ReceiptRequest req, long seq, ReceiptRecord rec, string invoiceKey, AnalysisResult analysis,
-        ExtractResult ext, ImageRead image, string? signedToken = null)
+        ExtractResult ext, ImageRead image, string? signedToken = null, bool printed = false)
     {
         var c = _cfg.Current;
-        byte[]? slip = null;
-        string url = signedToken != null ? DeskSigner.Url(c.ClaimBase!, signedToken) : c.ClaimBase + req.Code;
-        try { slip = QrReceipt.Build(url, c.CodePage, c.CodeTable, req.InvoiceNo, req.Amount); }
-        catch (ArgumentException) { _log.Error("pool slip not printable"); }
-        rec.QrPrinted = slip != null && _printIfCurrent(seq, slip);
-        if (rec.QrPrinted) ClearProblem(Problems.QrPrintFailed);
-        else _log.Warn("pool qr skipped: another job was forwarded or the slip did not print");
+        if (printed) rec.QrPrinted = true; // WO-105: printed before the OCR
+        else
+        {
+            byte[]? slip = null;
+            string url = signedToken != null ? DeskSigner.Url(c.ClaimBase!, signedToken) : c.ClaimBase + req.Code;
+            try { slip = QrReceipt.Build(url, c.CodePage, c.CodeTable, req.InvoiceNo, req.Amount); }
+            catch (ArgumentException) { _log.Error("pool slip not printable"); }
+            rec.QrPrinted = slip != null && _printIfCurrent(seq, slip);
+            if (rec.QrPrinted) ClearProblem(Problems.QrPrintFailed);
+            else _log.Warn("pool qr skipped: another job was forwarded or the slip did not print");
+        }
 
         var res = await _api.ReceiptAsync(c.DeviceToken!, req).ConfigureAwait(false);
         _log.Info($"receipt ({(signedToken != null ? "signed" : "pool")}) -> {res}");
-        string printed = rec.QrPrinted ? "QR مطبوع" : "QR لم يُطبع (طُبعت فاتورة بعدها)";
+        string printedText = rec.QrPrinted ? "QR مطبوع" : "QR لم يُطبع (طُبعت فاتورة بعدها)";
         if (res.Ok && res.Value != null)
         {
             rec.Registered = true;
@@ -665,7 +756,7 @@ public sealed class DeskAgent
                 rec.Status = "مسجّلة على جهاز آخر: QR هذه النسخة لا يعمل";
                 await ReportAsync("warn", "other", "pool code replaced: the invoice already had another code (printed on another till)").ConfigureAwait(false);
             }
-            else rec.Status = printed + (res.Value.Already ? " (فاتورة مكررة)" : "");
+            else rec.Status = printedText + (res.Value.Already ? " (فاتورة مكررة)" : "");
         }
         else if (res.Unauthorized)
         {
@@ -677,7 +768,7 @@ public sealed class DeskAgent
             // The printed code stays this receipt's: the queue binds it when the server answers again.
             _queue.Enqueue("receipt", req);
             SetProblem(res.Status == 429 ? Problems.RateLimited : Problems.Offline);
-            rec.Status = printed + "، يُسجَّل عند عودة الاتصال";
+            rec.Status = printedText + "، يُسجَّل عند عودة الاتصال";
             await ReportAsync("warn", "other", $"receipt queued with its pool code: {res}").ConfigureAwait(false);
         }
         else

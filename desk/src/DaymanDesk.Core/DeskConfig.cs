@@ -89,6 +89,13 @@ public sealed class DeskConfig
     public string? ClaimBase { get; set; }
     public Dictionary<string, string> PrintedCodes { get; set; } = new();
 
+    // WO-105: image receipts print a pool QR before the OCR. A kitchen ticket is an image too, so the picture's height
+    // tells them apart, learned from the OCR's verdicts: the shortest receipt seen and the tallest image that was not
+    // one (0 = none yet). The QR is printed at once only for a picture at least as tall as the first and taller than
+    // the second.
+    public int ImageReceiptMinHeight { get; set; }
+    public int ImageOtherMaxHeight { get; set; }
+
     // WO-95 (contract v1.3): the signing key (base64 X|Y|D, sealed with DPAPI like the token), this device's number in
     // the shop, whether the server holds the key, and the next seq of a signed QR (never reused, kept across pairings).
     // PrintedCodes holds "r:" + token for an invoice that got a signed QR (a reprint prints the same QR).

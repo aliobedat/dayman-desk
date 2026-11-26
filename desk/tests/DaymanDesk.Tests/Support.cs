@@ -78,10 +78,10 @@ public static class Receipts
     public static byte[] Ascii(string[] lines) => Job(lines.Select(l => Encoding.ASCII.GetBytes(l)));
 
     /// <summary>A receipt a Windows driver rendered as one raster image (GS v 0), 576 dots x 400 lines.</summary>
-    public static byte[] Raster()
+    public static byte[] Raster(int y = 400)
     {
         var o = new List<byte> { 0x1B, 0x40 };
-        int xBytes = 72, y = 400;
+        int xBytes = 72;
         o.AddRange(new byte[] { 0x1D, 0x76, 0x30, 0x00, (byte)xBytes, 0, (byte)(y & 0xFF), (byte)(y >> 8) });
         var rnd = new Random(7);
         for (int i = 0; i < xBytes * y; i++) o.Add((byte)(rnd.Next(4) == 0 ? rnd.Next(256) : 0));
