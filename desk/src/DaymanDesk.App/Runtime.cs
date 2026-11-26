@@ -7,7 +7,12 @@ namespace DaymanDesk.App;
 /// <summary>Owns the long-lived parts: config, log, listeners, agent, heartbeat.</summary>
 sealed class Runtime : IDisposable
 {
-    public static string DataDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DaymanDesk");
+    public static string DataDir => _dataDir ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "DaymanDesk");
+    static string? _dataDir;
+
+    /// <summary>WO-101: --screenshots (CI only) runs on a fresh temporary folder, never on a shop's ProgramData\DaymanDesk.</summary>
+    public static void UseTempDataDir() =>
+        _dataDir = Path.Combine(Path.GetTempPath(), "DaymanDesk-shots-" + Guid.NewGuid().ToString("N"));
     public static string Version => Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.1.0";
     static readonly TimeSpan HeartbeatEvery = TimeSpan.FromMinutes(5);
 

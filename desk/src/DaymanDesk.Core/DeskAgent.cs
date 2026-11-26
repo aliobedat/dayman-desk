@@ -952,6 +952,19 @@ public sealed class DeskAgent
     void Unpair(string? why)
     {
         _log.Error("device token refused (" + why + "): unpaired");
+        ClearPairing();
+        SetProblem(Problems.Revoked);
+    }
+
+    /// <summary>WO-101: «إلغاء الربط» in the window: this device forgets its pairing (the owner revokes it in the dashboard).</summary>
+    public void ForgetPairing()
+    {
+        _log.Info("unpaired from the window");
+        ClearPairing();
+    }
+
+    void ClearPairing()
+    {
         // WO-90: a revoked device's pool is void on the server; a new pairing starts a new one.
         _cfg.Update(c =>
         {
@@ -959,7 +972,6 @@ public sealed class DeskAgent
             // WO-95: a key belongs to one pairing (a new pairing sends a new one).
             c.SignKeyProtected = null; c.DeviceNumber = null; c.KeyRegistered = false;
         });
-        SetProblem(Problems.Revoked);
     }
 
     /// <summary>Today's counters roll over at local midnight. A disk error here is logged, never thrown.</summary>

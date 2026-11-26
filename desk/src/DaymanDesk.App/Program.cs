@@ -17,6 +17,24 @@ static class Program
         try { return _single?.WaitOne(5000) ?? false; } catch (AbandonedMutexException) { return true; }
     }
 
+    internal const string NeedsNet48 = "يحتاج دايماً ديسك إلى ‎.NET Framework 4.8. ثبّته من موقع Microsoft، ثم شغّل البرنامج مرة أخرى.";
+    internal const string AlreadyRunning = "دايماً ديسك يعمل الآن. افتحه من الأيقونة بجانب الساعة.\n\nلتثبيت إصدار جديد: اختر «خروج (إرجاع الطابعة)» من الأيقونة، ثم شغّل هذا الملف مرة أخرى.";
+
+    /// <summary>WO-101: a message before the main window exists, in the themed dialog (the system box if it cannot be drawn).</summary>
+    static void Notice(string text, MessageBoxIcon icon)
+    {
+        try
+        {
+            Application.EnableVisualStyles();
+            Ui.Msg(null, text, "دايماً ديسك", icon);
+        }
+        catch
+        {
+            MessageBox.Show(text, "دايماً ديسك", MessageBoxButtons.OK, icon, MessageBoxDefaultButton.Button1,
+                MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
+        }
+    }
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -24,9 +42,7 @@ static class Program
         if (!HasNet48())
         {
             if (!args.Contains("--watchdog") && !args.Contains("--tray"))
-                MessageBox.Show("يحتاج دايماً ديسك إلى ‎.NET Framework 4.8. ثبّته من موقع Microsoft، ثم شغّل البرنامج مرة أخرى.", "دايماً ديسك",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1,
-                    MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
+                Notice(NeedsNet48, MessageBoxIcon.Warning);
             return 2;
         }
         ReceiptAnalyzer.EnsureCodePages();
@@ -51,9 +67,7 @@ static class Program
         if (!first)
         {
             if (!args.Contains("--tray"))
-                MessageBox.Show("دايماً ديسك يعمل الآن. افتحه من الأيقونة بجانب الساعة.\n\nلتثبيت إصدار جديد: اختر «خروج (إرجاع الطابعة)» من الأيقونة، ثم شغّل هذا الملف مرة أخرى.", "دايماً ديسك",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information, MessageBoxDefaultButton.Button1,
-                    MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
+                Notice(AlreadyRunning, MessageBoxIcon.Information);
             return 0;
         }
 
@@ -61,10 +75,17 @@ static class Program
         ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        using var rt = new Runtime();
-        // CI only: renders every tab and the «تأكيد الحقول» dialog to PNG files (no printer, no network, no Start).
+        // CI only: renders every tab and dialog to PNG files (no printer, no network, no Start), on a fresh temporary
+        // data folder: the preview writes a fake pairing, which must never reach a shop's real config (WO-101).
         int shots = Array.IndexOf(args, "--screenshots");
-        if (shots >= 0 && shots + 1 < args.Length) return Screenshots.Run(rt, args[shots + 1]);
+        if (shots >= 0)
+        {
+            if (Environment.GetEnvironmentVariable("CI") != "true" || shots + 1 >= args.Length) return 2;
+            Runtime.UseTempDataDir();
+            using var preview = new Runtime();
+            return Screenshots.Run(preview, args[shots + 1]);
+        }
+        using var rt = new Runtime();
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             rt.Log.Error("CRASH " + e.ExceptionObject);

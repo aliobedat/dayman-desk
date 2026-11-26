@@ -200,12 +200,20 @@ public static class QrTests
         Assert.True(hex.Contains("1D286B0300315130"), "print");
         Assert.True(hex.Contains("1B7416"), "code table re-sent");
         Assert.True(hex.EndsWith("1D564200"), "cut at the end");
+        // WO-101 layout: centre, code table, line, bold caption, QR, small footer, back to normal text.
+        var caption = Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.Caption, 864));
+        var line = Convert.ToHexString(System.Text.Encoding.ASCII.GetBytes(QrReceipt.Separator));
+        Assert.True(hex.StartsWith("1B61011B7416" + line + "0A" + "1B2108" + caption + "1B21000A1D286B"), "line and bold caption over the QR");
+        var footer = Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.Footer, 864));
+        Assert.True(hex.EndsWith("1D286B03003151300A" + "1B2101" + footer + "1B21000A" + "1B61001B64041D564200"), "small footer after the QR");
+        Assert.True(hex.IndexOf("1D286B0300315130", StringComparison.Ordinal) > hex.IndexOf(caption, StringComparison.Ordinal), "caption before the QR");
     }
 
     public static void TestCaptionRoundTrips()
     {
         foreach (int cp in new[] { 864, 720, 1256 })
         {
+            Assert.True(!ArabicPrintEncoder.Encode(QrReceipt.Footer, cp).Contains((byte)'?'), "footer encodable in " + cp);
             var bytes = ArabicPrintEncoder.Encode(QrReceipt.Caption, cp);
             Assert.True(!bytes.Contains((byte)'?'), "unencodable glyph in " + cp);
             var back = ReceiptAnalyzer.GetDecoder(cp).GetString(bytes);
@@ -225,9 +233,9 @@ public static class QrTests
             var slip = QrReceipt.Build(url, cp, 22, "10432", "12.500");
             var lineBytes = ArabicPrintEncoder.Encode(line, cp);
             Assert.True(!lineBytes.Contains((byte)'?'), "unencodable glyph in " + cp);
-            var captionBytes = ArabicPrintEncoder.Encode(QrReceipt.Caption, cp);
-            var expected = Convert.ToHexString(captionBytes.Concat(new byte[] { 0x0A }).Concat(lineBytes).Concat(new byte[] { 0x0A }).ToArray());
-            Assert.True(Convert.ToHexString(slip).Contains(expected), "line right under the caption in " + cp);
+            // WO-101: the invoice line right under the QR, then the small footer.
+            var expected = "1D286B03003151300A" + Convert.ToHexString(lineBytes) + "0A1B2101";
+            Assert.True(Convert.ToHexString(slip).Contains(expected), "line right under the QR in " + cp);
             // Printed in visual order: the digits stay readable left to right, the Arabic reads back as written.
             var back = cp == 65001 ? System.Text.Encoding.UTF8.GetString(lineBytes) : ReceiptAnalyzer.GetDecoder(cp).GetString(lineBytes);
             Assert.True(back.Contains("10432") && back.Contains("12.500"), "digits readable in " + cp + ": " + back);
@@ -238,6 +246,7 @@ public static class QrTests
         // No known decoding: no Arabic, the same facts in ASCII.
         var plain = System.Text.Encoding.ASCII.GetString(QrReceipt.Build(url, null, null, "10432", "12.500"));
         Assert.True(plain.Contains("10432 - 12.500 JOD\n"), "ascii line");
+        Assert.True(plain.Contains("Dayman") && !plain.Contains("\u001B!\u0008"), "ascii footer, no Arabic caption");
         // A control character from the extractor never reaches the printer.
         var esc = System.Text.Encoding.ASCII.GetString(QrReceipt.Build(url, null, null, "10\u001B432", "1.000"));
         Assert.True(esc.Contains("10432 - 1.000 JOD\n"), "no ESC from the invoice");

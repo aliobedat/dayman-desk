@@ -46,7 +46,7 @@ sealed class LatinTextBox : TextBox
 /// <summary>The status window: state, today's receipts, the last problem with what to do, pairing and help.</summary>
 sealed class MainForm : Form
 {
-    const int CardWidth = 820;
+    const int CardWidth = 820, Half = (CardWidth - 16) / 2;
     readonly Runtime _rt;
     readonly NotifyIcon _tray;
     readonly ToolStripMenuItem _trayUpdate = new() { Visible = false };
@@ -54,9 +54,9 @@ sealed class MainForm : Form
     // Header and banners
     readonly Label _headline = Ui.Text("", Ui.Heading);
     readonly Label _subline = Ui.Text("", Ui.Body, Ui.Muted);
-    readonly Panel _confirmBanner = new() { Dock = DockStyle.Top, Height = Ui.Px(60), BackColor = Ui.WarningBg, Visible = false, Padding = new Padding(16, 8, 16, 8) };
-    readonly Panel _updateBanner = new() { Dock = DockStyle.Top, Height = Ui.Px(52), BackColor = Ui.SuccessBg, Visible = false, Padding = new Padding(16, 6, 16, 6) };
-    readonly Label _updateText = Ui.Text("", Ui.Strong, Ui.Success);
+    // WO-101: the owner-confirm and update banners are callouts under the header.
+    readonly Callout _confirmBanner = new(CardWidth) { Dock = DockStyle.Top, Visible = false, Margin = Padding.Empty };
+    readonly Callout _updateBanner = new(CardWidth) { Dock = DockStyle.Top, Visible = false, Margin = Padding.Empty };
     readonly Pill _pill = new();
     Action? _fit; // receipts columns to the list width
 
@@ -74,18 +74,37 @@ sealed class MainForm : Form
     readonly Button _start = Ui.Primary("تشغيل دايماً ديسك");
     readonly Button _stop = Ui.Secondary("إيقاف وإرجاع الطابعة");
     readonly Dictionary<string, Label> _info = new();
-    readonly Label[] _today = new Label[4];
-    readonly Label _problem = Ui.Text("", Ui.Body, Ui.Ink, CardWidth - 60);
-    readonly Label _problemAt = Ui.Text("", Ui.Body, Ui.Muted);
+    readonly Label[] _today = new Label[3];
+    readonly Label _todayMore = Ui.Text("", Ui.Body, Ui.Muted, Half - 60);
+    readonly Pill _connPill = new();
+    readonly Card _connCard = new("الاتصال", Half, Glyph.Link);
+    readonly Card _todayCard = new("اليوم", Half, Glyph.Chart);
+    readonly FlowLayoutPanel _printerRows = new() { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, BackColor = Ui.Surface, Margin = new Padding(0, 0, 0, 8) };
+    string _printerKey = "";
+    readonly Label _printersLoading = Ui.Text("جارٍ البحث عن الطابعات...", Ui.Body, Ui.Muted);
+    readonly Callout _problem = new(CardWidth);
+    readonly RoundButton _problemAction = Ui.Secondary("");
+    Action? _problemDo;
+    readonly Label _version = Ui.Text("", Ui.Strong, Ui.Ink, CardWidth - 120);
+    readonly Label _versionNote = Ui.Text("", Ui.Body, Ui.Muted, CardWidth - 120);
+    TabControl? _tabs;
 
     // Receipts tab
     readonly ListView _list = new() { View = View.Details, FullRowSelect = true, Dock = DockStyle.Fill, HeaderStyle = ColumnHeaderStyle.Nonclickable, Font = Ui.Body, RightToLeftLayout = true, BorderStyle = BorderStyle.None };
 
     // Pairing tab
-    readonly Label _pairStatus = Ui.Text("", Ui.Strong, Ui.Ink, CardWidth - 60);
-    readonly LatinTextBox _code = new() { Width = 130, MaxLength = 6, CharacterCasing = CharacterCasing.Upper, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
-    readonly LatinTextBox _deviceName = new() { Width = 180, Text = "كاشير 1", MaxLength = 40, Font = Ui.Body, Margin = new Padding(4, 8, 4, 4) };
-    readonly Button _pair = Ui.Primary("ربط");
+    readonly Card _pairCard = new("ربط الجهاز بالمحل", CardWidth, Glyph.Link);
+    readonly Card _pairedCard = new("الجهاز مربوط", CardWidth, Glyph.Check, Ui.Success, Ui.SuccessBg);
+    readonly StepsBar _steps = new(CardWidth - 60, "حمّل من لوحة التحكم", "اكتب رمز الربط", "جاهز");
+    readonly StepsBar _stepsDone = new(CardWidth - 60, "حمّل من لوحة التحكم", "اكتب رمز الربط", "جاهز") { Current = 3 };
+    readonly CodeBox _code = new();
+    readonly LatinTextBox _deviceName = new() { Width = 220, Text = "كاشير 1", MaxLength = 40, Font = Ui.Body, Margin = new Padding(4, 8, 4, 4) };
+    readonly RoundButton _pair = Ui.Primary("ربط");
+    readonly Callout _pairError = new(CardWidth - 60) { Visible = false, Margin = new Padding(4, 4, 4, 8) };
+    readonly Label _pairedShop = Ui.Text("", Ui.Title, Ui.Ink, CardWidth - 60);
+    readonly Label _pairedDevice = Ui.Text("", Ui.Body, Ui.Muted, CardWidth - 60);
+    readonly Button _unpair = Ui.Secondary("إلغاء الربط");
+    readonly Pill _fieldsPill = new();
     readonly Label _fieldsStatus = Ui.Text("", Ui.Body, Ui.Ink, CardWidth - 60);
     readonly Button _reconfirm = Ui.Secondary("إعادة تأكيد الحقول");
     readonly LatinTextBox _url = new() { Width = 380, RightToLeft = RightToLeft.No, Font = Ui.Mono, Margin = new Padding(4, 8, 4, 4) };
@@ -111,11 +130,12 @@ sealed class MainForm : Form
         Icon = AppIcon.Value;
 
         var tabs = new FlatTabs { Dock = DockStyle.Fill, RightToLeftLayout = true, Font = Ui.Body };
+        _tabs = tabs;
         tabs.TabPages.Add(StatusTab());
         tabs.TabPages.Add(ReceiptsTab());
         tabs.TabPages.Add(PairTab());
         // WO-91: a device revoked in the dashboard unlocks pairing at once, not at the next 5-minute heartbeat.
-        tabs.SelectedIndexChanged += (_, _) => { if (tabs.SelectedIndex == 2) RefreshFromServer(); };
+        tabs.SelectedIndexChanged += (_, _) => { if (tabs.SelectedIndex == 2 && !Preview) RefreshFromServer(); };
         tabs.TabPages.Add(HelpTab());
 
         Controls.Add(tabs);
@@ -129,6 +149,7 @@ sealed class MainForm : Form
         menu.Items.Add(_trayUpdate);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("خروج (إرجاع الطابعة)", null, (_, _) => ExitApp());
+        MenuRenderer.Apply(menu);
         _tray = new NotifyIcon { Icon = AppIcon.Value, Text = "دايماً ديسك", Visible = true, ContextMenuStrip = menu };
         _tray.DoubleClick += (_, _) => ShowWindow();
         _tray.BalloonTipClicked += (_, _) => ShowWindow();
@@ -228,28 +249,33 @@ sealed class MainForm : Form
 
     Control BuildBanners()
     {
-        var host = new Panel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink };
+        var host = new Panel { Dock = DockStyle.Top, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, BackColor = Ui.Canvas, Padding = new Padding(20, 12, 20, 0) };
         var confirmBtn = Ui.Primary("تأكيد الحقول");
-        confirmBtn.Dock = DockStyle.Left;
         confirmBtn.Click += (_, _) => { if (_rt.Agent.PendingConfirmation is { } p) OpenConfirm(p); };
-        var confirmText = Ui.Text(DeskAgent.AwaitingOwner + " (الإعدادات ← دايماً ديسك). يمكن للمثبّت التأكيد هنا.", Ui.Strong, Ui.Warning);
-        confirmText.Dock = DockStyle.Fill;
-        confirmText.AutoSize = false;
-        confirmText.TextAlign = ContentAlignment.MiddleRight;
-        _confirmBanner.Controls.Add(confirmText);
-        _confirmBanner.Controls.Add(confirmBtn);
+        _confirmBanner.Set(Glyph.Alert, Ui.Warning, Ui.WarningBg, DeskAgent.AwaitingOwner,
+            "الإعدادات ← دايماً ديسك. يمكن للمثبّت التأكيد هنا.");
+        _confirmBanner.SetAction(confirmBtn);
 
         var download = Ui.Secondary("تنزيل التحديث");
-        download.Dock = DockStyle.Left;
         download.Click += (_, _) => { if (_rt.Cfg.Current.UpdateUrl is { } u) Ui.OpenUrl(u); };
-        _updateText.Dock = DockStyle.Fill;
-        _updateText.AutoSize = false;
-        _updateText.TextAlign = ContentAlignment.MiddleRight;
-        _updateBanner.Controls.Add(_updateText);
-        _updateBanner.Controls.Add(download);
+        _updateBanner.SetAction(download);
 
+        var gap = new Panel { Dock = DockStyle.Top, Height = 8, BackColor = Ui.Canvas };
         host.Controls.Add(_updateBanner);
+        host.Controls.Add(gap);
         host.Controls.Add(_confirmBanner);
+        void Fit()
+        {
+            int w = Math.Max(300, ClientSize.Width - host.Padding.Horizontal);
+            _confirmBanner.Fit(w);
+            _updateBanner.Fit(w);
+            gap.Visible = _confirmBanner.Visible && _updateBanner.Visible;
+            host.Padding = new Padding(20, _confirmBanner.Visible || _updateBanner.Visible ? 12 : 0, 20, 0);
+        }
+        Resize += (_, _) => Fit();
+        _confirmBanner.VisibleChanged += (_, _) => Fit();
+        _updateBanner.VisibleChanged += (_, _) => Fit();
+        Fit();
         return host;
     }
 
@@ -265,6 +291,45 @@ sealed class MainForm : Form
     {
         var page = Page("الحالة", out var stack);
 
+        // Row 1: the connection and today's counters side by side.
+        foreach (var key in new[] { "المحل", "اسم الجهاز", "عنوان هذا الجهاز", "نوع الفواتير", "QR بعد الفاتورة" })
+            _info[key] = Ui.Text("-", Ui.Strong, Ui.Ink, Half - 60 - 120);
+        var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Ui.Surface, Margin = new Padding(0, 4, 0, 0) };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        foreach (var kv in _info)
+        {
+            grid.Controls.Add(Ui.Text(kv.Key, Ui.Body, Ui.Muted));
+            grid.Controls.Add(kv.Value);
+        }
+        _connCard.Add(_connPill, grid);
+
+        var counters = new TableLayoutPanel { ColumnCount = 3, AutoSize = true, BackColor = Ui.Surface, Margin = new Padding(0, 4, 0, 4) };
+        string[] captions = { "كل الفواتير", "طُبع لها QR", "بانتظار الإرسال" };
+        for (int i = 0; i < 3; i++)
+        {
+            counters.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, (Half - 60) / 3));
+            var cell = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, BackColor = Ui.Surface, WrapContents = false };
+            _today[i] = Ui.Text("0", Ui.BigNumber, Ui.Ink);
+            _today[i].RightToLeft = RightToLeft.No;
+            cell.Controls.Add(_today[i]);
+            cell.Controls.Add(Ui.Text(captions[i], Ui.Body, Ui.Muted));
+            counters.Controls.Add(cell, i, 0);
+        }
+        _todayCard.Add(counters, _todayMore,
+            Ui.Text("استلام الزبائن للنقاط يظهر في لوحة التحكم ← الإعدادات ← دايماً ديسك.", Ui.Body, Ui.Muted, Half - 60));
+        _connCard.Margin = new Padding(0, 0, 0, 16);
+        _todayCard.Margin = new Padding(16, 0, 0, 16);
+        var top = new FlowLayoutPanel { AutoSize = true, WrapContents = false, BackColor = Ui.Canvas, Margin = Padding.Empty };
+        top.Controls.Add(_connCard);
+        top.Controls.Add(_todayCard);
+        stack.Controls.Add(top);
+
+        // Row 2: the last problem as a callout, with what to do.
+        _problemAction.Click += (_, _) => _problemDo?.Invoke();
+        stack.Controls.Add(_problem);
+
+        // Row 3: printers.
         _refresh.Click += (_, _) => LoadPrinters();
         _printers.ItemCheck += (_, e) =>
         {
@@ -277,47 +342,44 @@ sealed class MainForm : Form
         _start.Click += (_, _) => RunBusy(() => _rt.Install(CheckedPrinters()), InstallFailed,
             "تم التشغيل. كل فاتورة تمر الآن عبر دايماً ديسك وتُطبع كالمعتاد.", needsPrinter: true);
         _stop.Click += (_, _) => StopAndRestore();
-        stack.Controls.Add(new Card("طابعات الفواتير", CardWidth).Add(
+        stack.Controls.Add(new Card("طابعات الفواتير", CardWidth, Glyph.Printer).Add(
+            _printerRows,
             Ui.Text("ضع علامة على كل طابعة يطبع عليها برنامج الكاشير الفواتير (طابعة USB أو COM أو طابعة شبكة). طابعة المطبخ لا تحتاج علامة.", Ui.Body, Ui.Muted, CardWidth - 60),
-            Ui.Row(_printers, _refresh), Ui.Row(_start, _stop)));
+            _printersLoading, Ui.Row(new FieldBox(_printers), _refresh), Ui.Row(_start, _stop)));
 
         _netSave.Click += (_, _) => SaveNetwork();
-        stack.Controls.Add(new Card("وضع الشبكة (أجهزة كاشير بلا Windows)", CardWidth).Add(
+        stack.Controls.Add(new Card("وضع الشبكة (أجهزة كاشير بلا Windows)", CardWidth, Glyph.Wifi).Add(
             Ui.Text("للتابلت وأجهزة الكاشير التي تطبع مباشرة إلى عنوان IP الطابعة. اكتب هنا عنوان الطابعة الحقيقي، ثم اكتب عنوان هذا الجهاز في جهاز الكاشير مكان عنوان الطابعة، مرة واحدة.", Ui.Body, Ui.Muted, CardWidth - 60),
             _netOn,
-            Ui.Row(Ui.Text("عنوان الطابعة (IP)"), _netPrinter, Ui.Text("منفذ هذا الجهاز"), _netPort, _netSave),
+            Ui.Row(Ui.Text("عنوان الطابعة (IP)"), new FieldBox(_netPrinter), Ui.Text("منفذ هذا الجهاز"), new FieldBox(_netPort), _netSave),
             _netIp,
             Ui.Text("يجب أن يبقى هذا الجهاز يعمل ومتصلاً بالشبكة. إن أُطفئ فلن تطبع أجهزة الكاشير حتى يعود، أو أعد فيها عنوان الطابعة الحقيقي.", Ui.Body, Ui.Muted, CardWidth - 60)));
 
-        stack.Controls.Add(new Card("آخر مشكلة", CardWidth).Add(_problem, _problemAt));
-
-        var grid = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Ui.Surface, Margin = new Padding(0, 4, 0, 0) };
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
-        grid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        foreach (var key in new[] { "المحل", "اسم الجهاز", "الطابعات", "عنوان هذا الجهاز", "نوع الفواتير", "QR بعد الفاتورة", "بانتظار الإرسال", "الإصدار" })
-        {
-            var value = Ui.Text("-", Ui.Strong, Ui.Ink, CardWidth - 260);
-            _info[key] = value;
-            grid.Controls.Add(Ui.Text(key, Ui.Body, Ui.Muted));
-            grid.Controls.Add(value);
-        }
-        stack.Controls.Add(new Card("الاتصال", CardWidth).Add(grid));
-
-        var counters = new TableLayoutPanel { ColumnCount = 4, AutoSize = true, BackColor = Ui.Surface, Margin = new Padding(0, 4, 0, 0) };
-        string[] captions = { "كل الفواتير", "مسجّلة", "طُبع لها QR", "لم تُسجّل" };
-        for (int i = 0; i < 4; i++)
-        {
-            counters.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190));
-            var cell = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, BackColor = Ui.Surface, WrapContents = false };
-            _today[i] = Ui.Text("0", Ui.BigNumber, i == 3 ? Ui.Danger : Ui.Ink);
-            _today[i].RightToLeft = RightToLeft.No;
-            cell.Controls.Add(_today[i]);
-            cell.Controls.Add(Ui.Text(captions[i], Ui.Body, Ui.Muted));
-            counters.Controls.Add(cell, i, 0);
-        }
-        stack.Controls.Add(new Card("فواتير اليوم", CardWidth).Add(counters,
-            Ui.Text("استلام الزبائن للنقاط يظهر في لوحة التحكم ← الإعدادات ← دايماً ديسك.", Ui.Body, Ui.Muted, CardWidth - 60)));
+        stack.Controls.Add(new Card("الإصدار", CardWidth, Glyph.Update, Ui.Success, Ui.SuccessBg).Add(_version, _versionNote));
         return page;
+    }
+
+    /// <summary>One printer row: its state as a pill, its name, and the line that says its original port is kept.</summary>
+    static Control PrinterRow(string name, bool running, string? originalPort)
+    {
+        var pill = new Pill();
+        if (running) pill.Set("يعمل", Ui.Success, Ui.SuccessBg); else pill.Set("متوقف", Ui.Muted, Ui.Surface2);
+        var text = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoSize = true, BackColor = Ui.Surface2, Margin = new Padding(4, 2, 4, 2) };
+        text.Controls.Add(Ui.Text(Ui.Latin(name), Ui.Strong, Ui.Ink, CardWidth - 220));
+        if (!string.IsNullOrEmpty(originalPort))
+        {
+            var port = Ui.Text(Ui.Latin($"المنفذ الأصلي محفوظ: {originalPort}، وترجع إليه الطابعة عند الإيقاف."), Ui.Body, Ui.Muted, CardWidth - 220);
+            port.Margin = new Padding(4, 0, 4, 4);
+            text.Controls.Add(port);
+        }
+        var row = new TableLayoutPanel { ColumnCount = 2, AutoSize = true, BackColor = Ui.Surface2, Margin = new Padding(4, 0, 4, 8), Padding = new Padding(10, 6, 10, 6),
+            MinimumSize = new Size(CardWidth - 60, 0) };
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        row.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        pill.Anchor = AnchorStyles.None;
+        row.Controls.Add(pill, 0, 0);
+        row.Controls.Add(text, 1, 0);
+        return row;
     }
 
     TabPage ReceiptsTab()
@@ -378,17 +440,33 @@ sealed class MainForm : Form
     {
         var page = Page("الربط", out var stack);
         _pair.Click += async (_, _) => await Pair();
-        _code.KeyDown += async (_, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; await Pair(); } };
-        stack.Controls.Add(new Card("ربط الجهاز بالمحل", CardWidth).Add(_pairStatus,
+        _code.Submit += async () => await Pair();
+        _code.TextChanged += (_, _) => { _steps.Current = _code.Text.Length > 0 ? 1 : 0; _pairError.Visible = false; };
+        _pair.MinimumSize = new Size(Ui.Px(140), Ui.Px(44));
+        var codeLabel = Ui.Text("رمز الربط", Ui.Strong, Ui.Ink2);
+        codeLabel.Margin = new Padding(4, 8, 4, 0);
+        _pairCard.Add(_steps,
             Ui.Text("أنشئ رمز ربط من لوحة التحكم ← الإعدادات ← دايماً ديسك. الرمز 6 خانات ويصلح 10 دقائق.", Ui.Body, Ui.Muted, CardWidth - 60),
-            Ui.Row(Ui.Text("رمز الربط"), _code, Ui.Text("اسم الجهاز"), _deviceName, _pair)));
+            codeLabel, _code, _pairError,
+            Ui.Row(Ui.Text("اسم الجهاز", Ui.Strong, Ui.Ink2), new FieldBox(_deviceName)), _pair);
+        stack.Controls.Add(_pairCard);
+
+        _unpair.Click += (_, _) =>
+        {
+            if (!Ask("سيُلغى ربط هذا الجهاز بالمحل، ولا يُطبع QR بعد الفواتير حتى تربطه من جديد. ألغِ الجهاز أيضاً من لوحة التحكم ← الإعدادات ← دايماً ديسك. هل تريد المتابعة؟")) return;
+            _rt.Agent.ForgetPairing();
+            RefreshState();
+        };
+        _pairedShop.Margin = new Padding(4, 0, 4, 0);
+        _pairedCard.Add(_stepsDone, _pairedShop, _pairedDevice, _unpair);
+        stack.Controls.Add(_pairedCard);
 
         _reconfirm.Click += (_, _) =>
         {
             if (Ask("سيطلب البرنامج تأكيد سطر رقم الفاتورة وسطر المجموع في الفاتورة التالية، ولا تُسجَّل الفواتير حتى تؤكدهما. هل تريد المتابعة؟"))
                 _rt.RequestReconfirm();
         };
-        stack.Controls.Add(new Card("حقول الفاتورة", CardWidth).Add(_fieldsStatus, _reconfirm));
+        stack.Controls.Add(new Card("حقول الفاتورة", CardWidth, Glyph.Receipt).Add(_fieldsPill, _fieldsStatus, _reconfirm));
 
         _saveUrl.Click += (_, _) =>
         {
@@ -400,15 +478,35 @@ sealed class MainForm : Form
             _url.Text = _rt.Cfg.Current.ServerUrl;
             RefreshState();
         };
-        stack.Controls.Add(new Card("عنوان الخادم (للدعم الفني فقط)", CardWidth).Add(
+        stack.Controls.Add(new Card("عنوان الخادم (للدعم الفني فقط)", CardWidth, Glyph.Shield).Add(
             Ui.Text("لا تغيّر هذا العنوان إلا بطلب من دعم دايماً. تغيير الخادم يلغي الربط.", Ui.Body, Ui.Muted, CardWidth - 60),
-            Ui.Row(_url, _saveUrl)));
+            Ui.Row(new FieldBox(_url), _saveUrl)));
         return page;
     }
+
+    /// <summary>A pairing refusal under the code boxes (in place of a message box).</summary>
+    internal void ShowPairError(string text)
+    {
+        _code.Invalid = true;
+        _code.Invalidate();
+        _pairError.Set(Glyph.Error, Ui.Danger, Ui.DangerBg, "لم يتم الربط", Ui.Latin(text));
+        _pairError.Visible = true;
+    }
+
+    internal void SetCodeForPreview(string code) => _code.Text = code;
 
     TabPage HelpTab()
     {
         var page = Page("مساعدة", out var stack);
+
+        // The golden rule first: whatever happens, this button gives the shop its printer back.
+        var stop = Ui.DangerOutline("إيقاف وإرجاع الطابعة");
+        stop.MinimumSize = new Size(Ui.Px(220), Ui.Px(44));
+        stop.Click += (_, _) => StopAndRestore();
+        stack.Controls.Add(new Card("القاعدة الذهبية: إيقاف وإرجاع الطابعة", CardWidth, Glyph.Power, Ui.Danger, Ui.DangerBg).Add(
+            Ui.Text("إن واجهت أي مشكلة في الطباعة فاضغط هذا الزر. يرجع طابعة الفواتير إلى منفذها الأصلي، ويحذف طابعة دايماً ومهام البرنامج. بعدها تُطبع الفواتير مباشرة كما كانت قبل التثبيت.", Ui.Body, Ui.Ink, CardWidth - 60),
+            stop, _manualPort));
+
         string[] steps =
         {
             "1. نزّل الملف DaymanDesk.exe وشغّله، ووافق على صلاحيات المدير. إن ظهر تحذير Windows فاضغط More info ثم Run anyway لمتابعة التشغيل. بعدها تجد «دايماً ديسك» في قائمة Start، وأيقونته بجانب الساعة (إن لم تظهر فاضغط السهم ^).",
@@ -417,19 +515,35 @@ sealed class MainForm : Form
             "4. اطبع فاتورة من برنامج الكاشير، ثم أكّد في نافذة «تأكيد الحقول» سطر رقم الفاتورة وسطر المجموع.",
             "5. اطبع فاتورة أخرى: تخرج بعدها قسيمة QR. امسحها بالجوال وتأكد من وصول النقاط إلى البطاقة.",
         };
-        var install = new Card("خطوات التثبيت", CardWidth);
-        foreach (var s in steps) install.Add(Ui.Text(s, Ui.Body, Ui.Ink, CardWidth - 60));
-        stack.Controls.Add(install);
+        var how = new Card("كيف يعمل", CardWidth, Glyph.Info);
+        foreach (var s in steps) how.Add(Ui.Text(s, Ui.Body, Ui.Ink, CardWidth - 60));
+        how.Add(Ui.Text("الفاتورة تُطبع أولاً ثم يقرؤها البرنامج، فلا يؤخر الطباعة. إن توقف البرنامج لأي سبب تعود الطابعة إلى منفذها الأصلي خلال دقيقة.", Ui.Body, Ui.Ink2, CardWidth - 60),
+            Ui.Text("لا يرسل البرنامج إلى الخادم إلا رقم الفاتورة والمجموع، وعينات من أول الفواتير لتحسين القراءة إن فعّل صاحب المحل ذلك.", Ui.Body, Ui.Muted, CardWidth - 60));
+        stack.Controls.Add(how);
 
-        var stop = Ui.Secondary("إيقاف وإرجاع الطابعة");
-        stop.Click += (_, _) => StopAndRestore();
-        stack.Controls.Add(new Card("إيقاف وإرجاع الطابعة", CardWidth).Add(
-            Ui.Text("يرجع طابعة الفواتير إلى منفذها الأصلي، ويحذف طابعة دايماً ومهام البرنامج. بعدها تُطبع الفواتير مباشرة كما كانت قبل التثبيت.", Ui.Body, Ui.Ink, CardWidth - 60),
-            stop, _manualPort));
+        (string q, string a)[] faq =
+        {
+            ("لا تُطبع الفواتير", "اضغط «إيقاف وإرجاع الطابعة» أعلاه، فترجع الطابعة إلى منفذها الأصلي وتطبع مباشرة."),
+            ("لا يخرج QR بعد الفاتورة", "تأكد أن الجهاز مربوط في تبويب «الربط»، وأن صاحب المحل أكّد الحقول من لوحة التحكم، ثم انظر «آخر مشكلة» في تبويب «الحالة»."),
+            ("رقم الفاتورة أو المجموع المقروء خطأ", "اضغط «إعادة تأكيد الحقول» في تبويب «الربط»، ثم أكّد السطرين الصحيحين في الفاتورة التالية."),
+            ("انقطع الإنترنت", "تُطبع الفواتير كالمعتاد، وتُرسل إلى الخادم عند عودة الاتصال."),
+            ("لا أجد أيقونة البرنامج", "اضغط السهم ^ بجانب الساعة، أو افتح «دايماً ديسك» من قائمة Start."),
+        };
+        var common = new Card("المشاكل الشائعة وحلولها", CardWidth, Glyph.Alert, Ui.Warning, Ui.WarningBg);
+        foreach (var (q, a) in faq)
+        {
+            var ql = Ui.Text(q, Ui.Strong, Ui.Ink, CardWidth - 60);
+            ql.Margin = new Padding(4, 8, 4, 0);
+            var al = Ui.Text(a, Ui.Body, Ui.Muted, CardWidth - 60);
+            al.Margin = new Padding(4, 2, 4, 6);
+            common.Add(ql, al);
+        }
+        stack.Controls.Add(common);
 
-        stack.Controls.Add(new Card("الأمان", CardWidth).Add(
-            Ui.Text("الفاتورة تُطبع أولاً ثم يقرؤها البرنامج، فلا يؤخر الطباعة. إن توقف البرنامج لأي سبب تعود الطابعة إلى منفذها الأصلي خلال دقيقة.", Ui.Body, Ui.Ink, CardWidth - 60),
-            Ui.Text("لا يرسل البرنامج إلى الخادم إلا رقم الفاتورة والمجموع، وعينات من أول الفواتير لتحسين القراءة إن فعّل صاحب المحل ذلك.", Ui.Body, Ui.Muted, CardWidth - 60)));
+        var site = Ui.Primary("فتح daymanjo.com");
+        site.Click += (_, _) => Ui.OpenUrl("https://daymanjo.com");
+        stack.Controls.Add(new Card("تواصل معنا", CardWidth, Glyph.Chat, Ui.Accent, Ui.AccentSoft).Add(
+            Ui.Text("لأي سؤال أو مشكلة تواصل مع دعم دايماً من موقعنا.", Ui.Body, Ui.Ink, CardWidth - 60), site));
         return page;
     }
 
@@ -457,6 +571,7 @@ sealed class MainForm : Form
             catch (Exception ex) { _rt.Log.Error("list printers: " + ex.Message); return new List<PrinterInfo>(); }
         }).ContinueWith(t => BeginInvokeSafe(() =>
         {
+            _printersLoading.Visible = false;
             _printers.Items.Clear();
             var chosen = _rt.Cfg.Current.Printers.Select(r => r.PrinterName).ToHashSet();
             foreach (var p in t.Result.Where(p => !p.Name.StartsWith("Dayman Raw (", StringComparison.Ordinal)))
@@ -530,13 +645,12 @@ sealed class MainForm : Form
         _netIp.ForeColor = netOn ? Ui.Success : Ui.Ink;
 
         SetPill(on, c.Paired, !string.IsNullOrEmpty(c.LastProblem));
+        if (!c.Paired) _connPill.Set("غير مربوط", Ui.Warning, Ui.WarningBg);
+        else if (c.LastProblem == Problems.Offline) _connPill.Set("غير متصل بالخادم", Ui.Danger, Ui.DangerBg);
+        else _connPill.Set("متصل بالخادم", Ui.Success, Ui.SuccessBg);
         _subline.Text = c.Paired ? c.ShopName ?? "" : "غير مربوط";
         _info["المحل"].Text = c.Paired ? c.ShopName ?? "-" : "غير مربوط";
         _info["اسم الجهاز"].Text = c.Paired ? c.DeviceName ?? "-" : "-";
-        var names = new List<string>();
-        if (printersOn) names.AddRange(c.Printers.Where(r => _rt.Server.IsRunning(r.Id)).Select(r => r.PrinterName ?? "-"));
-        if (netOn) names.Add("وضع الشبكة ← " + net!.DirectHost);
-        _info["الطابعات"].Text = names.Count == 0 ? "لا شيء" : string.Join("، ", names);
         _info["عنوان هذا الجهاز"].Text = ipText;
         _info["نوع الفواتير"].Text = c.LastPrintKind switch
         {
@@ -548,33 +662,73 @@ sealed class MainForm : Form
         };
         _info["QR بعد الفاتورة"].Text = !c.Paired ? "بعد ربط الجهاز" : !c.QrEnabled ? "أوقفه صاحب المحل من لوحة التحكم"
             : !c.FieldsConfirmed ? "بعد تأكيد صاحب المحل للحقول من لوحة التحكم" : "يعمل";
-        int q = _rt.Queue.Count;
-        _info["بانتظار الإرسال"].Text = q == 0 ? "لا شيء" : q.ToString(CultureInfo.InvariantCulture) + " (تُرسل عند عودة الاتصال)";
-        _info["الإصدار"].Text = Runtime.Version + (c.UpdateVersion != null ? $"  (يوجد تحديث: {c.UpdateVersion})"
-            : c.UpdatedTo == Runtime.Version ? $"  (تم التحديث إلى {Runtime.Version})" : "  (أحدث إصدار)");
 
+        // Printers: each configured one with its state, and the network route.
+        var rows = c.Printers.Where(r => !string.IsNullOrEmpty(r.PrinterName))
+            .Select(r => (name: r.PrinterName!, run: _rt.Server.IsRunning(r.Id), port: r.OriginalPort)).ToList();
+        if (net != null) rows.Add(("وضع الشبكة ← " + net.DirectHost, netOn, null));
+        string key = string.Join("|", rows.Select(r => r.name + r.run + r.port));
+        if (key != _printerKey || _printerRows.Controls.Count == 0)
+        {
+            _printerKey = key;
+            _printerRows.SuspendLayout();
+            foreach (Control old in _printerRows.Controls.Cast<Control>().ToList()) old.Dispose();
+            if (rows.Count == 0)
+                _printerRows.Controls.Add(Ui.Text("لم تُشغَّل أي طابعة بعد. ضع علامة على طابعة الفواتير في القائمة ثم اضغط «تشغيل دايماً ديسك».", Ui.Body, Ui.Muted, CardWidth - 60));
+            else foreach (var r in rows) _printerRows.Controls.Add(PrinterRow(r.name, r.run, r.port));
+            _printerRows.ResumeLayout();
+        }
+
+        int q = _rt.Queue.Count;
         string today = DateTimeOffset.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         bool isToday = c.StatsDay == today;
-        int[] vals = isToday ? new[] { c.TodayReceipts, c.TodayRegistered, c.TodayQr, c.TodayNotRegistered } : new int[4];
-        for (int i = 0; i < 4; i++) _today[i].Text = vals[i].ToString(CultureInfo.InvariantCulture);
-        _today[3].ForeColor = vals[3] > 0 ? Ui.Danger : Ui.Ink;
+        int[] vals = isToday ? new[] { c.TodayReceipts, c.TodayQr, q } : new[] { 0, 0, q };
+        for (int i = 0; i < 3; i++) _today[i].Text = vals[i].ToString(CultureInfo.InvariantCulture);
+        _today[2].ForeColor = q > 0 ? Ui.Warning : Ui.Ink;
+        _todayMore.Text = !isToday || c.TodayReceipts == 0 ? "لم تمر فواتير اليوم بعد."
+            : $"مسجّلة {c.TodayRegistered} · لم تُسجّل {c.TodayNotRegistered}" + (q > 0 ? " · تُرسل المنتظرة عند عودة الاتصال" : "");
+        _todayMore.ForeColor = isToday && c.TodayNotRegistered > 0 ? Ui.Danger : Ui.Muted;
+        Equalize(_connCard, _todayCard);
+
+        _version.Text = Runtime.Version + " · يتحدّث تلقائياً";
+        _versionNote.Text = c.UpdateVersion != null ? $"يوجد تحديث: الإصدار {c.UpdateVersion}."
+            : c.UpdatedTo == Runtime.Version ? $"تم التحديث إلى {Runtime.Version}." : "أحدث إصدار.";
 
         if (string.IsNullOrEmpty(c.LastProblem))
         {
-            _problem.Text = "لا توجد مشاكل.";
-            _problem.ForeColor = Ui.Success;
-            _problemAt.Text = "";
+            _problem.Set(Glyph.Check, Ui.Success, Ui.SuccessBg, "لا توجد مشاكل.", "");
+            _problem.SetAction(null);
+            _problemDo = null;
         }
         else
         {
-            _problem.Text = Problems.Describe(c.LastProblem, c.LastProblemDetail);
-            _problem.ForeColor = Ui.Danger;
-            _problemAt.Text = c.LastProblemAt is { } at ? ProblemTime(at.ToLocalTime()) : "";
+            string at = c.LastProblemAt is { } t ? " (" + ProblemTime(t.ToLocalTime()) + ")" : "";
+            _problem.Set(Glyph.Alert, Ui.Danger, Ui.DangerBg, "آخر مشكلة" + at, Problems.Describe(c.LastProblem, c.LastProblemDetail));
+            string? label = null;
+            Action? act = null;
+            switch (c.LastProblem)
+            {
+                case Problems.Revoked: case Problems.TokenUnreadable: case Problems.ParseFailed: case Problems.ImageUnreadable:
+                    label = "فتح تبويب «الربط»"; act = () => { if (_tabs != null) _tabs.SelectedIndex = 2; }; break;
+                case Problems.ForwardFailed: case Problems.ListenerBusy:
+                    label = "تشغيل دايماً ديسك"; act = () => _start.PerformClick(); break;
+                case Problems.RestoreFailed:
+                    label = "فتح «مساعدة»"; act = () => { if (_tabs != null) _tabs.SelectedIndex = 3; }; break;
+            }
+            _problemDo = act;
+            if (label != null) _problemAction.Text = label;
+            _problem.SetAction(label != null ? _problemAction : null);
         }
 
-        _pairStatus.Text = c.Paired ? $"مربوط بمحل {c.ShopName} باسم «{c.DeviceName}»." : "الجهاز غير مربوط بأي محل.";
+        _pairCard.Visible = !c.Paired;
+        _pairedCard.Visible = c.Paired;
+        _pairedShop.Text = c.ShopName ?? "-";
+        _pairedDevice.Text = $"هذا الجهاز مربوط باسم «{c.DeviceName}». تُرسل فواتيره إلى هذا المحل.";
         _code.Enabled = _pair.Enabled = _deviceName.Enabled = !c.Paired;
         if (!_url.Focused) _url.Text = c.ServerUrl;
+        if (!c.Paired) _fieldsPill.Set("بعد الربط", Ui.Muted, Ui.Surface2);
+        else if (c.FieldsConfirmed) _fieldsPill.Set("مؤكَّدة", Ui.Success, Ui.SuccessBg);
+        else _fieldsPill.Set("بانتظار التأكيد", Ui.Warning, Ui.WarningBg);
         _fieldsStatus.Text = !c.Paired ? "يُطلب التأكيد في أول فاتورة بعد الربط."
             : c.FieldsConfirmed ? "أكّد صاحب المحل سطر رقم الفاتورة وسطر المجموع. إن تغيّر شكل الفاتورة فاضغط «إعادة تأكيد الحقول»."
             : "لم تُؤكَّد بعد: اطبع فاتورة من برنامج الكاشير، ثم يؤكد صاحب المحل سطريها من لوحة التحكم.";
@@ -583,10 +737,12 @@ sealed class MainForm : Form
         _manualPort.Text = originals.Count > 0
             ? "إن لم تطبع الفواتير بعد الإيقاف: افتح خصائص الطابعة ← Ports واختر منفذها الأصلي: " + string.Join("، ", originals) + "."
             : "";
+        _manualPort.Visible = originals.Count > 0;
 
-        _confirmBanner.Visible = c.Paired && !c.FieldsConfirmed && _rt.Agent.PendingConfirmation != null;
+        _confirmBanner.Visible = c.Paired && !c.FieldsConfirmed && (_rt.Agent.PendingConfirmation != null || PreviewConfirm);
         _updateBanner.Visible = c.UpdateVersion != null && c.UpdateUrl != null;
-        _updateText.Text = $"يوجد تحديث: الإصدار {c.UpdateVersion}. يحدّث البرنامج نفسه تلقائياً حين لا تُطبع فواتير. إن لم يتم، نزّله وأغلق البرنامج من الأيقونة بجانب الساعة وشغّل الملف الجديد.";
+        _updateBanner.Set(Glyph.Update, Ui.Success, Ui.SuccessBg, Ui.Latin($"يوجد تحديث: الإصدار {c.UpdateVersion}"),
+            "يحدّث البرنامج نفسه تلقائياً حين لا تُطبع فواتير. إن لم يتم، نزّله وأغلق البرنامج من الأيقونة بجانب الساعة وشغّل الملف الجديد.");
         _trayUpdate.Visible = _updateBanner.Visible;
         _trayUpdate.Text = Ui.Latin($"يوجد تحديث: الإصدار {c.UpdateVersion}");
 
@@ -605,9 +761,11 @@ sealed class MainForm : Form
 
     void SetPill(bool on, bool paired, bool problem)
     {
+        // WO-101: the program's state only; the server connection is in the «الاتصال» card.
         if (problem) _pill.Set("مشكلة", Ui.Danger, Ui.DangerBg);
-        else if (on && paired) _pill.Set("متصل", Ui.Success, Ui.SuccessBg);
-        else _pill.Set("غير متصل", Ui.Warning, Ui.WarningBg);
+        else if (!paired) _pill.Set("غير مربوط", Ui.Warning, Ui.WarningBg);
+        else if (on) _pill.Set("يعمل", Ui.Success, Ui.SuccessBg);
+        else _pill.Set("متوقف", Ui.Muted, Ui.Surface2);
     }
 
     void SetHeadline(string text, Color color)
@@ -616,7 +774,20 @@ sealed class MainForm : Form
         _headline.ForeColor = color;
     }
 
+    /// <summary>Two cards side by side get the taller one's height.</summary>
+    static void Equalize(Card a, Card b)
+    {
+        a.MinimumSize = new Size(a.MaximumSize.Width, 0);
+        b.MinimumSize = new Size(b.MaximumSize.Width, 0);
+        int h = Math.Max(a.GetPreferredSize(Size.Empty).Height, b.GetPreferredSize(Size.Empty).Height);
+        a.MinimumSize = new Size(a.MaximumSize.Width, h);
+        b.MinimumSize = new Size(b.MaximumSize.Width, h);
+    }
+
     internal void AddReceiptForPreview(ReceiptRecord r) => AddReceipt(r);
+    internal static bool PreviewConfirm;
+    internal void RefreshForPreview() => RefreshState();
+    internal ContextMenuStrip TrayMenuForPreview => _tray.ContextMenuStrip;
 
     void AddReceipt(ReceiptRecord r)
     {
@@ -691,11 +862,12 @@ sealed class MainForm : Form
         string code = _code.Text.Trim();
         if (DeskAgent.PairCodeProblem(code) is { } problem)
         {
-            Msg(problem, MessageBoxIcon.Warning);
+            ShowPairError(problem);
             return;
         }
         string name = string.IsNullOrWhiteSpace(_deviceName.Text) ? "كاشير" : _deviceName.Text.Trim();
         _pair.Enabled = false;
+        _pairError.Visible = false;
         _pair.Text = "جارٍ الربط...";
         ApiResult<PairResponse> r;
         try { r = await _rt.Agent.PairAsync(code, name); }
@@ -707,7 +879,7 @@ sealed class MainForm : Form
             Msg($"تم الربط بمحل {r.Value!.ShopName}. اطبع الآن فاتورة من برنامج الكاشير لتأكيد الحقول.", MessageBoxIcon.Information);
             _ = _rt.Agent.HeartbeatAsync();
         }
-        else Msg(DeskAgent.PairError(r), MessageBoxIcon.Warning);
+        else ShowPairError(DeskAgent.PairError(r));
     }
 
     void ExportSamples()
@@ -732,13 +904,10 @@ sealed class MainForm : Form
     void Msg(string text, MessageBoxIcon icon)
     {
         if (Preview) return;
-        MessageBox.Show(this, Ui.Latin(text), "دايماً ديسك", MessageBoxButtons.OK, icon, MessageBoxDefaultButton.Button1,
-            MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign);
+        Ui.Msg(this, text, "دايماً ديسك", icon);
     }
 
-    bool Ask(string text) => !Preview &&
-        MessageBox.Show(this, Ui.Latin(text), "دايماً ديسك", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2,
-            MessageBoxOptions.RtlReading | MessageBoxOptions.RightAlign) == DialogResult.Yes;
+    bool Ask(string text) => !Preview && Ui.Ask(this, text, "دايماً ديسك");
 
     void ShowWindow()
     {
