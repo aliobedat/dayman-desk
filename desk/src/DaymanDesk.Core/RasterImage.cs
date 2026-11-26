@@ -42,6 +42,18 @@ public sealed class MonoBitmap
         return o;
     }
 
+    /// <summary>WO-104: the rows of one OCR line (a little padding), with the columns of its letter words blanked.</summary>
+    public MonoBitmap LineCrop(OcrLine line)
+    {
+        int pad = Math.Max(2, (line.Bottom - line.Top) / 6);
+        int y0 = Math.Max(0, line.Top - pad), y1 = Math.Min(Height, line.Bottom + pad);
+        var o = Rows(y0, Math.Max(1, y1 - y0));
+        foreach (var (left, right) in line.WordsWithoutDigits)
+            for (int y = 0; y < o.Height; y++)
+                for (int x = Math.Max(0, left - pad); x <= Math.Min(Width - 1, right + pad); x++) o.Pixels[y * Width + x] = 0;
+        return o;
+    }
+
     public MonoBitmap Rows(int y0, int height)
     {
         var px = new byte[Width * height];
@@ -70,11 +82,27 @@ public sealed class MonoBitmap
     }
 }
 
-/// <summary>Reads the text of an image receipt (Windows.Media.Ocr in the App; a fake in tests).</summary>
+/// <summary>One OCR line: its text, its rows in the image, and the columns of its words that hold no digit (WO-104).</summary>
+public sealed class OcrLine
+{
+    public OcrLine(string text, int top = 0, int bottom = 0, IReadOnlyList<(int Left, int Right)>? wordsWithoutDigits = null)
+    {
+        Text = text; Top = top; Bottom = bottom;
+        WordsWithoutDigits = wordsWithoutDigits ?? Array.Empty<(int, int)>();
+    }
+    public string Text { get; }
+    public int Top { get; }
+    public int Bottom { get; }
+    public IReadOnlyList<(int Left, int Right)> WordsWithoutDigits { get; }
+}
+
+/// <summary>Reads the text of an image receipt (Tesseract in the App; a fake in tests).</summary>
 public interface IOcr
 {
     /// <summary>The text lines top to bottom, or null when no OCR engine is available on this PC.</summary>
-    Task<IReadOnlyList<string>?> ReadAsync(MonoBitmap image);
+    Task<IReadOnlyList<OcrLine>?> ReadAsync(MonoBitmap image);
+    /// <summary>WO-104: reads one line crop as a single line, English only, with only these characters. Null when unavailable.</summary>
+    Task<string?> ReadLineAsync(MonoBitmap crop, string allowedChars);
     /// <summary>The recognizer language of the last read (WO-91: learned fields belong to it), or null.</summary>
     string? LanguageTag { get; }
 }
@@ -176,20 +204,51 @@ public static class OcrText
         foreach (var raw in lines)
         {
             if (string.IsNullOrWhiteSpace(raw)) continue;
-            var sb = new StringBuilder(raw.Length);
-            foreach (char ch in raw)
-            {
-                char c = ch;
-                if (c >= '٠' && c <= '٩') c = (char)('0' + (c - '٠'));
-                else if (c >= '۰' && c <= '۹') c = (char)('0' + (c - '۰'));
-                else if (c == '٫') c = '.';
-                else if (c == '٬') c = ',';
-                sb.Append(c);
-            }
-            var s = AroundSeparator.Replace(sb.ToString(), "$1$2");
-            s = string.Join(" ", s.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+            var s = CleanLine(raw);
             if (s.Length > 0) o.Add(s);
         }
         return o;
+    }
+
+    const string TotalChars = "0123456789.,-";
+    const string InvoiceChars = "0123456789.,-/_#ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+    /// <summary>
+    /// WO-104: reads an image receipt: the page, then each line that holds the invoice number or the total (the
+    /// owner's confirmed lines, else the labelled ones) again on its own crop, English only and as one line, with its
+    /// letter words blanked. A large bold total («الإجمالي 1.50 د.ا») that the page read loses is read there
+    /// (ReceiptExtractor.MergeLineRead: only a value the page lost is taken from it). Null when no OCR engine is available.
+    /// </summary>
+    public static async Task<IReadOnlyList<string>?> ReadReceiptAsync(IOcr ocr, MonoBitmap image, LearnedField? invoice, LearnedField? total)
+    {
+        var page = await ocr.ReadAsync(image).ConfigureAwait(false);
+        if (page == null) return null;
+        var kept = page.Where(l => !string.IsNullOrWhiteSpace(l.Text) && CleanLine(l.Text).Length > 0).ToList();
+        var lines = kept.Select(l => CleanLine(l.Text)).ToList();
+        var (invLines, totLines) = ReceiptExtractor.FieldLines(lines, invoice, total);
+        foreach (int i in invLines.Union(totLines).OrderBy(i => i))
+        {
+            if (kept[i].Bottom <= kept[i].Top) continue;
+            bool isTotal = totLines.Contains(i) && !invLines.Contains(i);
+            var read = await ocr.ReadLineAsync(image.LineCrop(kept[i]), isTotal ? TotalChars : InvoiceChars).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(read)) lines[i] = ReceiptExtractor.MergeLineRead(lines[i], CleanLine(read!), isTotal);
+        }
+        return lines;
+    }
+
+    static string CleanLine(string raw)
+    {
+        var sb = new StringBuilder(raw.Length);
+        foreach (char ch in raw)
+        {
+            char c = ch;
+            if (c >= '٠' && c <= '٩') c = (char)('0' + (c - '٠'));
+            else if (c >= '۰' && c <= '۹') c = (char)('0' + (c - '۰'));
+            else if (c == '٫') c = '.';
+            else if (c == '٬') c = ',';
+            sb.Append(c);
+        }
+        var s = AroundSeparator.Replace(sb.ToString(), "$1$2");
+        return string.Join(" ", s.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
     }
 }

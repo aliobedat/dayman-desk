@@ -314,6 +314,65 @@ public static class ReceiptExtractor
         return hits.OrderBy(i => Math.Abs((fromBottom ? lines.Count - 1 - i : i) - f.Position));
     }
 
+    /// <summary>
+    /// WO-104: the lines of an OCR page worth reading again on their own: the value lines of the owner's confirmed
+    /// fields, and every line labelled as an invoice number or a total (not excluded), with the next line when the
+    /// label line holds no number.
+    /// </summary>
+    public static (ISet<int> invoice, ISet<int> total) FieldLines(IReadOnlyList<string> rawLines, LearnedField? learnedInvoice, LearnedField? learnedTotal)
+    {
+        var lines = rawLines.Select(l => new Line(l)).ToList();
+        var inv = new HashSet<int>();
+        var tot = new HashSet<int>();
+        void Learned(HashSet<int> set, LearnedField? f, bool fromBottom)
+        {
+            if (f == null) return;
+            var hits = !string.IsNullOrEmpty(f.Shape) ? ShapeMatches(lines, f, fromBottom).hits
+                : !string.IsNullOrEmpty(f.Label) ? Matches(lines, f, fromBottom) : Enumerable.Empty<int>();
+            foreach (int i in hits) if ((f.ValueOnNextLine ? i + 1 : i) < lines.Count) set.Add(f.ValueOnNextLine ? i + 1 : i);
+        }
+        Learned(inv, learnedInvoice, false);
+        Learned(tot, learnedTotal, true);
+        void Labelled(HashSet<int> set, int i)
+        {
+            set.Add(i);
+            if (!lines[i].Fwd.Any(char.IsDigit) && i + 1 < lines.Count) set.Add(i + 1);
+        }
+        for (int i = 0; i < lines.Count; i++)
+        {
+            var line = lines[i];
+            string both = line.Fwd + " | " + line.Rev;
+            if (!ContainsAny(line.Fwd, InvoiceExclude) && !ContainsAny(line.Rev, InvoiceExclude)
+                && InvoiceLabels.Any(l => Find(line.Fwd, l).idx >= 0 || Find(line.Rev, l).idx >= 0)) Labelled(inv, i);
+            if (!ContainsAny(both, TotalExclude) && (ContainsAny(both, InclusiveWords) || !ContainsAny(both, TaxWords))
+                && TotalLabels.Any(l => Find(line.Fwd, l).idx >= 0 || Find(line.Rev, l).idx >= 0)) Labelled(tot, i);
+        }
+        return (inv, tot);
+    }
+
+    static readonly Regex DecimalRx = new(@"\d+[.,]\d{1,3}(?![\d.,])", RegexOptions.Compiled);
+
+    /// <summary>
+    /// WO-104: a page line completed by its own line read, only where the page lost the value (a read that was fine is
+    /// never replaced: the line read may pick up a stray mark). Total: a page line without a decimal amount takes the
+    /// line read's decimal amounts in place of its numbers. Invoice: a page line without an invoice-like token takes the
+    /// line read's longest one when it has at least 3 digits.
+    /// </summary>
+    public static string MergeLineRead(string page, string read, bool total)
+    {
+        if (total)
+        {
+            if (DecimalRx.IsMatch(page)) return page;
+            var amounts = DecimalRx.Matches(read).Cast<Match>().Select(m => m.Value).ToList();
+            if (amounts.Count == 0) return page;
+            var rest = NumberRx.Replace(page, " ");
+            return string.Join(" ", (rest + " " + string.Join(" ", amounts)).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries));
+        }
+        if (InvoiceTokens(page).Any(t => t.Any(char.IsDigit))) return page;
+        var best = InvoiceTokens(read).Where(t => t.Count(char.IsDigit) >= 3).OrderByDescending(t => t.Length).FirstOrDefault();
+        return best == null ? page : page + " " + best;
+    }
+
     static (string? value, double conf, string? line) ApplyInvoice(List<Line> lines, LearnedField f)
     {
         if (!string.IsNullOrEmpty(f.Shape))

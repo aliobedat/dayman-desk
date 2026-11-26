@@ -119,6 +119,25 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "OCR self-test failed" }
           if (-not ((Get-Content "$png.txt" -Raw) -match 'invoice 10432/10432 total 12\.5')) { throw "OCR read the wrong numbers" }
 
+      # WO-104: real image receipts (raw print jobs) from a live shop. Kept outside desk/ (mirrored to a public repo);
+      # absent there, so this step skips.
+      - name: OCR self-test (shop print jobs)
+        shell: powershell
+        run: |
+          $dir = Join-Path $pwd "ci-fixtures/jmra"
+          if (-not (Test-Path $dir)) { Write-Host "ci-fixtures absent: skipped"; exit 0 }
+          $want = @{ 'receipt-6.bin' = 'invoice INV-20261126-00006/INV-20261126-00006 total 1\.50*/1\.50*\s'; 'receipt-5.bin' = 'invoice INV-20261126-0000\d/INV-20261126-0000\d total 1\.50*/1\.50*\s'; 'kitchen.bin' = 'receipt no/no' }
+          $failed = $false
+          foreach ($f in $want.Keys) {
+            $job = Join-Path $dir $f
+            # The owner confirmed the invoice line (INV-...) and the total line: played first, as in the shop.
+            $p = Start-Process desk/publish/DaymanDesk.exe -ArgumentList '--ocr-selftest', "`"$job`"", 'INV-' -PassThru -Wait
+            $txt = Get-Content "$job.txt" -Raw
+            Write-Host "== $f (exit $($p.ExitCode))"; Write-Host $txt
+            if ($p.ExitCode -ne 0 -or -not ($txt -match $want[$f])) { Write-Host "FAILED: $f"; $failed = $true }
+          }
+          if ($failed) { throw "OCR self-test on shop print jobs failed" }
+
       # WO-95b: key, DPAPI seal, P1363 signature and SPKI verify on .NET Framework.
       - name: Signing self-test
         shell: powershell

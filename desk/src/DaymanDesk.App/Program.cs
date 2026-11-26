@@ -49,7 +49,7 @@ static class Program
         if (args.Contains("--watchdog")) return RunWatchdog();
         // CI only (WO-95): reads a receipt picture with the bundled OCR, as an image receipt is read.
         int selftest = Array.IndexOf(args, "--ocr-selftest");
-        if (selftest >= 0 && selftest + 1 < args.Length) return OcrSelfTest(args[selftest + 1]);
+        if (selftest >= 0 && selftest + 1 < args.Length) return OcrSelfTest(args[selftest + 1], selftest + 2 < args.Length ? args[selftest + 2] : null);
         int signtest = Array.IndexOf(args, "--sign-selftest");
         if (signtest >= 0 && signtest + 1 < args.Length) return SignSelfTest(args[signtest + 1]);
         int updtest = Array.IndexOf(args, "--update-selftest");
@@ -107,43 +107,62 @@ static class Program
     }
 
     /// <summary>
-    /// Reads the PNG twice (as printed and upscaled, as DeskAgent does) and writes the result to &lt;png&gt;.txt. Exit 0
-    /// only when both reads give the same invoice number and total.
+    /// Reads a receipt picture (a PNG, or WO-104 a raw print job .bin with its raster decoded) twice (as printed and
+    /// upscaled, with the line re-reads, as DeskAgent does) and writes the result to &lt;file&gt;.txt. Exit 0 only when
+    /// both reads give the same invoice number and total, or both say it is not a receipt. With invoiceHint (WO-104)
+    /// the owner's confirmation is played first: the invoice is learned from the first line holding the hint and the
+    /// total from the detected total line, and both reads then use them, as on a shop's later receipts.
     /// </summary>
-    static int OcrSelfTest(string png)
+    static int OcrSelfTest(string file, string? invoiceHint)
     {
         var o = new System.Text.StringBuilder();
         int code = 1;
         try
         {
-            MonoBitmap m;
-            using (var bmp = new System.Drawing.Bitmap(png))
+            MonoBitmap? m;
+            if (file.EndsWith(".bin", StringComparison.OrdinalIgnoreCase)) m = RasterDecoder.Decode(File.ReadAllBytes(file));
+            else
             {
+                using var bmp = new System.Drawing.Bitmap(file);
                 m = new MonoBitmap(bmp.Width, bmp.Height);
                 for (int y = 0; y < bmp.Height; y++)
                     for (int x = 0; x < bmp.Width; x++)
                         m.Pixels[y * bmp.Width + x] = bmp.GetPixel(x, y).GetBrightness() < 0.5f ? (byte)1 : (byte)0;
             }
+            if (m == null) throw new InvalidDataException("no raster image in the job");
             var log = new RollingLog(Path.Combine(Path.GetTempPath(), "dayman-ocr-selftest"));
             using var ocr = new TesseractOcr(log, Installer.LockDataDir(log));
+            LearnedField? inv = null, tot = null;
+            if (invoiceHint != null)
+            {
+                var seen = OcrText.ReadReceiptAsync(ocr, m, null, null).GetAwaiter().GetResult() ?? Array.Empty<string>();
+                int li = seen.ToList().FindIndex(l => l.Contains(invoiceHint));
+                int ti = seen.ToList().IndexOf(ReceiptExtractor.Extract(seen, ocr: true).TotalLine ?? "\0");
+                inv = li >= 0 ? ReceiptExtractor.LearnInvoice(seen, li)?.field : null;
+                tot = ti >= 0 ? ReceiptExtractor.LearnTotal(seen, ti)?.field : null;
+                o.AppendLine($"confirmed: invoice line {li} {(inv != null ? "learned" : "not learned")}, total line {ti} {(tot != null ? "learned" : "not learned")}");
+            }
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            var first = ocr.ReadAsync(m).GetAwaiter().GetResult();
+            var first = OcrText.ReadReceiptAsync(ocr, m, inv, tot).GetAwaiter().GetResult();
             long t1 = sw.ElapsedMilliseconds;
-            var second = ocr.ReadAsync(m.Scale2x()).GetAwaiter().GetResult();
+            var second = OcrText.ReadReceiptAsync(ocr, m.Scale2x(), inv, tot).GetAwaiter().GetResult();
             long t2 = sw.ElapsedMilliseconds - t1;
             if (first == null || second == null) o.AppendLine("ocr unavailable (see the log in %TEMP%\\dayman-ocr-selftest)");
             else
             {
-                var a = ReceiptExtractor.Extract(OcrText.Clean(first), ocr: true);
-                var b = ReceiptExtractor.Extract(OcrText.Clean(second), ocr: true);
+                var a = ReceiptExtractor.Extract(first, inv, tot, ocr: true);
+                var b = ReceiptExtractor.Extract(second, inv, tot, ocr: true);
+                bool na = ReceiptExtractor.IsNonReceipt(first, a), nb = ReceiptExtractor.IsNonReceipt(second, b);
                 o.AppendLine("read 1 (" + t1 + " ms): " + string.Join(" | ", first));
                 o.AppendLine("read 2 (" + t2 + " ms): " + string.Join(" | ", second));
                 o.AppendLine($"invoice {a.InvoiceNo}/{b.InvoiceNo} total {a.Total}/{b.Total}");
-                if (a.InvoiceNo != null && a.Total != null && a.InvoiceNo == b.InvoiceNo && a.Total == b.Total) code = 0;
+                o.AppendLine($"receipt {(na ? "no" : "yes")}/{(nb ? "no" : "yes")}");
+                if (na && nb) code = 0;
+                else if (!na && !nb && a.InvoiceNo != null && a.Total != null && a.InvoiceNo == b.InvoiceNo && a.Total == b.Total) code = 0;
             }
         }
         catch (Exception ex) { o.AppendLine("error: " + ex); }
-        File.WriteAllText(png + ".txt", o.ToString());
+        File.WriteAllText(file + ".txt", o.ToString());
         return code;
     }
 

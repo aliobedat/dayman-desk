@@ -282,10 +282,14 @@ public sealed class DeskAgent
         var bmp = RasterDecoder.Decode(job);
         if (bmp == null) return ImageRead.Undecodable;
         IReadOnlyList<string>? first, second;
+        // WO-104: each read also reads the confirmed invoice and total lines again on their own.
+        var c = _cfg.Current;
+        var inv = c.FieldsConfirmed ? c.LearnedInvoice : null;
+        var tot = c.FieldsConfirmed ? c.LearnedTotal : null;
         try
         {
-            first = await _ocr.ReadAsync(bmp).ConfigureAwait(false);
-            second = first == null ? null : await _ocr.ReadAsync(bmp.Scale2x()).ConfigureAwait(false);
+            first = await OcrText.ReadReceiptAsync(_ocr, bmp, inv, tot).ConfigureAwait(false);
+            second = first == null ? null : await OcrText.ReadReceiptAsync(_ocr, bmp.Scale2x(), inv, tot).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -293,7 +297,7 @@ public sealed class DeskAgent
             first = second = null;
         }
         if (first == null) return ImageRead.NoEngine;
-        setLines(OcrText.Clean(first), OcrText.Clean(second ?? Array.Empty<string>()));
+        setLines(first, second ?? Array.Empty<string>());
         return ImageRead.Read;
     }
 

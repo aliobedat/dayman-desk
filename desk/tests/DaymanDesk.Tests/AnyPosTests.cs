@@ -65,7 +65,14 @@ public static class AnyPosTests
     {
         public Func<MonoBitmap, IReadOnlyList<string>?> Read = _ => null;
         public readonly List<MonoBitmap> Seen = new();
-        public Task<IReadOnlyList<string>?> ReadAsync(MonoBitmap image) { Seen.Add(image); return Task.FromResult(Read(image)); }
+        public Func<MonoBitmap, string, string?> ReadLine = (_, _) => null;
+        public Task<IReadOnlyList<OcrLine>?> ReadAsync(MonoBitmap image)
+        {
+            Seen.Add(image);
+            var r = Read(image);
+            return Task.FromResult(r == null ? null : (IReadOnlyList<OcrLine>)r.Select((t, i) => new OcrLine(t, i * 10, i * 10 + 8)).ToList());
+        }
+        public Task<string?> ReadLineAsync(MonoBitmap crop, string allowedChars) => Task.FromResult(ReadLine(crop, allowedChars));
         public string? LanguageTag { get; set; }
     }
 
@@ -654,6 +661,27 @@ public static class AnyPosTests
         Assert.Equal("10432", doc.RootElement.GetProperty("invoiceNo").GetString(), "invoice");
         Assert.Equal("6.670", doc.RootElement.GetProperty("amount").GetString(), "amount");
         Assert.Equal(1, rig.Cfg.Current.TodayQr, "counted");
+    }
+
+    /// <summary>WO-104: a large bold total the page read loses («الإجمالي 0 د.أ») is read again on its own line crop.</summary>
+    public static async Task TestOcrTotalLineReadAgain()
+    {
+        var rig = new Rig();
+        var lost = OcrReceipt.Select(l => l.StartsWith("الإجمالي") ? "الإجمالي 0 د.أ" : l).ToArray();
+        rig.Ocr.Read = _ => lost;
+        var asked = new List<string>();
+        rig.Ocr.ReadLine = (crop, chars) => { asked.Add(chars); return chars.Contains('A') ? null : "6.670"; };
+        var rec = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);
+        Assert.True(asked.Count >= 4, "invoice and total lines re-read in both reads: " + asked.Count);
+        Assert.True(rec.QrPrinted, "qr printed: " + rec.Status);
+        using var doc = JsonDocument.Parse(rig.Calls("/receipt").Single());
+        Assert.Equal("6.670", doc.RootElement.GetProperty("amount").GetString(), "amount from the line read");
+
+        Assert.Equal("رقم الفاتورة: INV-71", ReceiptExtractor.MergeLineRead("رقم الفاتورة: INV-71", "Ixl INV-77 7", total: false), "a page token is kept");
+        Assert.Equal("رقم الفاتورة: INV-777", ReceiptExtractor.MergeLineRead("رقم الفاتورة:", "Ixl INV-777 7", total: false), "a lost invoice taken from the line read");
+        Assert.Equal("Thanks", ReceiptExtractor.MergeLineRead("Thanks", "77", total: false), "junk digits never become an invoice");
+        Assert.Equal("Total 12.500", ReceiptExtractor.MergeLineRead("Total 12.500", "42.500", total: true), "a page amount is kept");
+        Assert.Equal("Total 0 JOD", ReceiptExtractor.MergeLineRead("Total 0 JOD", "7", total: true), "no decimal amount: page kept");
     }
 
     public static async Task TestImageReceiptConfirmationThenRegisters()

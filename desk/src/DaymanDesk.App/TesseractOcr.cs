@@ -84,7 +84,7 @@ sealed class TesseractOcr : IOcr, IDisposable
         return _engine;
     }
 
-    public async Task<IReadOnlyList<string>?> ReadAsync(MonoBitmap image)
+    public async Task<IReadOnlyList<OcrLine>?> ReadAsync(MonoBitmap image)
     {
         await _gate.WaitAsync().ConfigureAwait(false);
         try
@@ -92,16 +92,62 @@ sealed class TesseractOcr : IOcr, IDisposable
             return await Task.Run(() =>
             {
                 var engine = Engine();
-                if (engine == null) return (IReadOnlyList<string>?)null;
-                var lines = new List<string>();
+                if (engine == null) return (IReadOnlyList<OcrLine>?)null;
+                var lines = new List<OcrLine>();
+                int y0 = 0;
                 foreach (var part in image.SplitForOcr(4000))
                 {
-                    using var pix = Pix.LoadFromMemory(ToPgm(part));
-                    using var page = engine.Process(pix, PageSegMode.SingleColumn);
-                    foreach (var l in (page.GetText() ?? "").Split('\n'))
-                        if (l.Trim().Length > 0) lines.Add(l.Trim());
+                    using (var pix = Pix.LoadFromMemory(ToPgm(part)))
+                    using (var page = engine.Process(pix, PageSegMode.SingleColumn))
+                    using (var it = page.GetIterator())
+                    {
+                        // WO-104: each line with its rows and the columns of its words without a digit (blanked on a re-read).
+                        it.Begin();
+                        do
+                        {
+                            var text = (it.GetText(PageIteratorLevel.TextLine) ?? "").Trim();
+                            if (text.Length == 0 || !it.TryGetBoundingBox(PageIteratorLevel.TextLine, out var box)) continue;
+                            var letters = new List<(int, int)>();
+                            do
+                            {
+                                var w = it.GetText(PageIteratorLevel.Word) ?? "";
+                                if (!w.Any(char.IsDigit) && it.TryGetBoundingBox(PageIteratorLevel.Word, out var wb)) letters.Add((wb.X1, wb.X2));
+                            } while (it.Next(PageIteratorLevel.TextLine, PageIteratorLevel.Word));
+                            lines.Add(new OcrLine(text, box.Y1 + y0, box.Y2 + y0, letters));
+                        } while (it.Next(PageIteratorLevel.TextLine));
+                    }
+                    y0 += part.Height;
                 }
                 return lines;
+            }).ConfigureAwait(false);
+        }
+        finally { _gate.Release(); }
+    }
+
+    TesseractEngine? _lineEngine;
+
+    /// <summary>WO-104: one line crop, English only, as a single line, with only the allowed characters.</summary>
+    public async Task<string?> ReadLineAsync(MonoBitmap crop, string allowedChars)
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(() =>
+            {
+                if (Engine() == null) return null;
+                try
+                {
+                    _lineEngine ??= new TesseractEngine(Path.Combine(Dir, "tessdata"), "eng", EngineMode.LstmOnly);
+                    _lineEngine.SetVariable("tessedit_char_whitelist", allowedChars);
+                    using var pix = Pix.LoadFromMemory(ToPgm(crop));
+                    using var page = _lineEngine.Process(pix, PageSegMode.SingleLine);
+                    return (page.GetText() ?? "").Trim();
+                }
+                catch (Exception ex)
+                {
+                    _log.Warn("ocr line read failed: " + ex.GetType().Name + ": " + ex.Message);
+                    return null;
+                }
             }).ConfigureAwait(false);
         }
         finally { _gate.Release(); }
@@ -117,7 +163,7 @@ sealed class TesseractOcr : IOcr, IDisposable
         return o;
     }
 
-    public void Dispose() => _engine?.Dispose();
+    public void Dispose() { _lineEngine?.Dispose(); _engine?.Dispose(); }
 
     [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
     static extern bool SetDllDirectory(string path);
