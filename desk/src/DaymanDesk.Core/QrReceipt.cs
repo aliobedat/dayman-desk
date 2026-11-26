@@ -3,37 +3,51 @@ using System.Text;
 namespace DaymanDesk.Core;
 
 /// <summary>
-/// Builds the QR slip printed after a registered receipt: a line, the bold caption, native ESC/POS QR (GS ( k), the
-/// invoice line (WO-88: with two tills on one printer the customer matches the slip to his receipt), a small footer, cut.
+/// Builds the QR slip printed after a registered receipt: a line, the bold caption, native ESC/POS QR (GS ( k), a small
+/// footer, cut (WO-107: no invoice line).
 /// </summary>
 public static class QrReceipt
 {
-    public const string Caption = "امسح لتحصل على نقاطك";
+    /// <summary>WO-107: the caption's start; what he gets follows it.</summary>
+    public const string CaptionStart = "امسح الكود واحصل على ";
+
+    /// <summary>The bold caption: «ختم» in a visit-mode shop; in a points shop the receipt's points, floor(amount in JOD),
+    /// in the Arabic count form; «نقاط فاتورتك» when the amount is not known yet (instant slip) or under 1 JOD.</summary>
+    public static string Caption(string? stampMode, string? amount)
+    {
+        if (stampMode == "visit") return CaptionStart + "ختم";
+        long n = 0;
+        if (amount != null && decimal.TryParse(amount, System.Globalization.NumberStyles.AllowDecimalPoint,
+                System.Globalization.CultureInfo.InvariantCulture, out var jod) && jod < 1_000_000_000m)
+            n = (long)Math.Floor(jod);
+        return CaptionStart + n switch
+        {
+            <= 0 => "نقاط فاتورتك",
+            1 => "نقطة واحدة",
+            2 => "نقطتين",
+            <= 10 => $"{n} نقاط",
+            _ => $"{n} نقطة",
+        };
+    }
+
     /// <summary>The small footer: the brand without its tanween (no code page the printers use has the mark).</summary>
     public const string Footer = "دايما";
     /// <summary>A thin line in ASCII (the same bytes in every code page), 32 columns: fits 58 mm and 80 mm paper.</summary>
     public const string Separator = "--------------------------------";
 
-    /// <summary>«فاتورة 10432 · 12.500 د.أ»: the invoice number and the amount exactly as sent to /receipt.</summary>
-    public static string InvoiceLine(string invoiceNo, string amount) => $"فاتورة {Printable(invoiceNo)} · {Printable(amount)} د.أ";
-
-    /// <summary>The same line in ASCII, for a printer whose decoding is unknown (no Arabic).</summary>
-    public static string InvoiceLineAscii(string invoiceNo, string amount) => $"{Printable(invoiceNo)} - {Printable(amount)} JOD";
-
-    // Never a control byte from an extracted field into the printer stream.
-    static string Printable(string s) => new(s.Where(c => c >= 0x20 && c != 0x7F).ToArray());
-
     /// <param name="codePage">The shop's decoding (864, 720, 1256, 65001); null prints no Arabic caption.</param>
     /// <param name="codeTable">The ESC t value seen in the shop's own receipts, re-sent so the caption uses the same table.</param>
-    /// <param name="invoiceNo">The invoice number as sent to /receipt; with <paramref name="amount"/>, one line under the caption.</param>
-    public static byte[] Build(string url, int? codePage, int? codeTable, string? invoiceNo = null, string? amount = null, int size = 6)
+    /// <param name="amount">The receipt's amount in JOD as sent to /receipt; null when not known yet.</param>
+    /// <param name="stampMode">The shop's mode ("spend" or "visit"); unknown counts as spend.</param>
+    public static byte[] Build(string url, int? codePage, int? codeTable, string? amount = null,
+        string? stampMode = null, int size = 6)
     {
         var data = Encoding.ASCII.GetBytes(url);
         if (data.Length == 0 || data.Length > 700) throw new ArgumentException("url length", nameof(url));
         if (url.Any(c => c > 0x7E || c < 0x21)) throw new ArgumentException("url must be printable ASCII", nameof(url));
 
         var o = new List<byte>(data.Length + 128);
-        // WO-101 layout, centred: a thin line, the caption in bold, the QR, the invoice line, a small «دايما».
+        // WO-101 layout, centred: a thin line, the caption in bold, the QR, a small «دايما» (WO-107).
         // No ESC @: it would reset the code table the POS selected. Text modes go back to normal (ESC ! 0) at the end.
         o.AddRange(new byte[] { 0x1B, 0x61, 0x01 });                                     // centre
         if (codePage != null && codeTable != null) o.AddRange(new byte[] { 0x1B, 0x74, (byte)codeTable.Value });
@@ -42,7 +56,7 @@ public static class QrReceipt
         if (codePage != null)
         {
             o.AddRange(new byte[] { 0x1B, 0x21, 0x08 });                                 // bold
-            o.AddRange(ArabicPrintEncoder.Encode(Caption, codePage.Value));
+            o.AddRange(ArabicPrintEncoder.Encode(Caption(stampMode, amount), codePage.Value));
             o.AddRange(new byte[] { 0x1B, 0x21, 0x00 });
             o.Add(0x0A);
         }
@@ -54,12 +68,6 @@ public static class QrReceipt
         o.AddRange(data);
         o.AddRange(new byte[] { 0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x51, 0x30 });        // print
         o.Add(0x0A);
-        if (invoiceNo != null && amount != null)
-        {
-            o.AddRange(codePage != null ? ArabicPrintEncoder.Encode(InvoiceLine(invoiceNo, amount), codePage.Value)
-                : Encoding.ASCII.GetBytes(InvoiceLineAscii(invoiceNo, amount)));
-            o.Add(0x0A);
-        }
         o.AddRange(new byte[] { 0x1B, 0x21, 0x01 });                                     // small (font B)
         o.AddRange(codePage != null ? ArabicPrintEncoder.Encode(Footer, codePage.Value) : Encoding.ASCII.GetBytes("Dayman"));
         o.AddRange(new byte[] { 0x1B, 0x21, 0x00 });                                     // normal

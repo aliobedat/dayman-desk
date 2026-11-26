@@ -88,7 +88,8 @@ and after 7 days. `invoiceLine` / `totalLine`: the detected lines, -1 when none.
 
 ## POST /heartbeat (every 5 minutes)
 Request `{ "appVersion": "1.0.0", "printKind": "text"|"image"|"unknown", "queueLength": 0, "lastForwardMs": 42, "lastProblem": "offline", "lastProblemText": "<Arabic>", "fieldsApplied": "<uuid>" }`
-200 `{ "serverTime": "<ISO>", "qrEnabled": true, "codeValidityDays": 2, "latestVersion": "1.0.0", "downloadUrl": "https://...", "fieldsConfirmed": { "sampleId": "<uuid>", "invoiceLine": 3, "totalLine": 9 } }`
+200 `{ "serverTime": "<ISO>", "qrEnabled": true, "codeValidityDays": 2, "stampMode": "spend"|"visit", "latestVersion": "1.0.0", "downloadUrl": "https://...", "fieldsConfirmed": { "sampleId": "<uuid>", "invoiceLine": 3, "totalLine": 9 } }`
+- **WO-107** `stampMode`: the shop's mode now (as at `/pair`); the program words the QR slip by it. An older server omits it: the program keeps the mode it has.
 - **v1.4** `lastProblem` (code, `[a-z_]{1,40}`) and `lastProblemText` (its Arabic text, ≤ 400, scrubbed like `/fields`):
   the program's current problem, null when none, omitted = unchanged. Shown on the owner's device card and in /admin.
 - **v1.4** `fieldsConfirmed`: the owner confirmed the sample `sampleId` on his dashboard. It is answered on every

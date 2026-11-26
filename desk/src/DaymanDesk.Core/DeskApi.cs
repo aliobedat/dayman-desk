@@ -31,7 +31,7 @@ public sealed record HeartbeatRequest(string AppVersion, string PrintKind, int Q
 /// <summary>v1.1: latestVersion and downloadUrl are optional (omitted when the server has no download set).
 /// v1.4: fieldsConfirmed, once, after the owner confirmed the first receipt's lines on his dashboard.</summary>
 public sealed record HeartbeatResponse(string ServerTime, bool QrEnabled, int CodeValidityDays,
-    string? LatestVersion = null, string? DownloadUrl = null, FieldsChoice? FieldsConfirmed = null);
+    string? LatestVersion = null, string? DownloadUrl = null, FieldsChoice? FieldsConfirmed = null, string? StampMode = null);
 /// <summary>v1.4 (WO-97): the first receipt's lines (scrubbed, at most 60 x 80) for the owner's dashboard.</summary>
 public sealed record FieldsRequest(string SampleId, List<string> Lines, int InvoiceLine, int TotalLine,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Problem = null);

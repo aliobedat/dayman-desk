@@ -360,7 +360,7 @@ public sealed class DeskAgent
         if (taken == null) return Skip("pool empty", "لا أكواد جاهزة");
         c = _cfg.Current;
         bool printed = false;
-        try { printed = _printIfCurrent(seq, QrReceipt.Build(c.ClaimBase + taken.Code, c.CodePage, c.CodeTable)); }
+        try { printed = _printIfCurrent(seq, QrReceipt.Build(c.ClaimBase + taken.Code, c.CodePage, c.CodeTable, stampMode: c.StampMode)); }
         catch (ArgumentException) { _log.Error("pool slip not printable"); }
         if (!printed)
         {
@@ -529,7 +529,7 @@ public sealed class DeskAgent
             if (!_cfg.Current.QrEnabled) { rec.Status = "مسجّلة (أوقف صاحب المحل QR)"; return; }
             var c = _cfg.Current;
             byte[] slip;
-            try { slip = QrReceipt.Build(res.Value.ClaimUrl, c.CodePage, c.CodeTable, req.InvoiceNo, req.Amount); }
+            try { slip = QrReceipt.Build(res.Value.ClaimUrl, c.CodePage, c.CodeTable, req.Amount, c.StampMode); }
             catch (ArgumentException)
             {
                 rec.Status = "مسجّلة: رابط QR غير صالح";
@@ -747,7 +747,7 @@ public sealed class DeskAgent
         {
             byte[]? slip = null;
             string url = signedToken != null ? DeskSigner.Url(c.ClaimBase!, signedToken) : c.ClaimBase + req.Code;
-            try { slip = QrReceipt.Build(url, c.CodePage, c.CodeTable, req.InvoiceNo, req.Amount); }
+            try { slip = QrReceipt.Build(url, c.CodePage, c.CodeTable, req.Amount, c.StampMode); }
             catch (ArgumentException) { _log.Error("pool slip not printable"); }
             rec.QrPrinted = slip != null && _printIfCurrent(seq, slip);
             if (rec.QrPrinted) ClearProblem(Problems.QrPrintFailed);
@@ -1154,6 +1154,7 @@ public sealed class DeskAgent
             _cfg.Update(c =>
             {
                 c.QrEnabled = v.QrEnabled; c.CodeValidityDays = v.CodeValidityDays;
+                if (v.StampMode is "spend" or "visit") c.StampMode = v.StampMode; // WO-107: an older server omits it
                 c.UpdateVersion = newer ? v.LatestVersion!.Trim() : null;
                 c.UpdateUrl = newer ? v.DownloadUrl : null;
             });

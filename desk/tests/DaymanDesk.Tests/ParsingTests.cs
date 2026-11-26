@@ -201,7 +201,7 @@ public static class QrTests
         Assert.True(hex.Contains("1B7416"), "code table re-sent");
         Assert.True(hex.EndsWith("1D564200"), "cut at the end");
         // WO-101 layout: centre, code table, line, bold caption, QR, small footer, back to normal text.
-        var caption = Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.Caption, 864));
+        var caption = Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.Caption(null, null), 864));
         var line = Convert.ToHexString(System.Text.Encoding.ASCII.GetBytes(QrReceipt.Separator));
         Assert.True(hex.StartsWith("1B61011B7416" + line + "0A" + "1B2108" + caption + "1B21000A1D286B"), "line and bold caption over the QR");
         var footer = Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.Footer, 864));
@@ -214,44 +214,55 @@ public static class QrTests
         foreach (int cp in new[] { 864, 720, 1256 })
         {
             Assert.True(!ArabicPrintEncoder.Encode(QrReceipt.Footer, cp).Contains((byte)'?'), "footer encodable in " + cp);
-            var bytes = ArabicPrintEncoder.Encode(QrReceipt.Caption, cp);
-            Assert.True(!bytes.Contains((byte)'?'), "unencodable glyph in " + cp);
-            var back = ReceiptAnalyzer.GetDecoder(cp).GetString(bytes);
-            var logical = TextNormalizer.Normalize(TextNormalizer.Reverse(back));
-            Assert.Equal(TextNormalizer.Normalize(QrReceipt.Caption), logical, "caption " + cp);
+            foreach (var (mode, amount) in new[] { ("spend", (string?)null), ("spend", "1.000"), ("spend", "2.5"), ("visit", "7.000") })
+            {
+                var caption = QrReceipt.Caption(mode, amount);
+                var bytes = ArabicPrintEncoder.Encode(caption, cp);
+                Assert.True(!bytes.Contains((byte)'?'), "unencodable glyph in " + cp + ": " + caption);
+                var back = ReceiptAnalyzer.GetDecoder(cp).GetString(bytes);
+                var logical = TextNormalizer.Normalize(TextNormalizer.Reverse(back));
+                Assert.Equal(TextNormalizer.Normalize(caption), logical, "caption " + cp);
+            }
         }
     }
 
-    // WO-88: the invoice line under the caption, readable in every code page the program prints in.
-    public static void TestQrInvoiceLine()
+    // WO-107: the caption says what the scan gives, in the Arabic count form.
+    public static void TestCaptionCountForms()
+    {
+        const string s = QrReceipt.CaptionStart;
+        Assert.Equal(s + "نقطة واحدة", QrReceipt.Caption("spend", "1.000"), "1");
+        Assert.Equal(s + "نقطتين", QrReceipt.Caption("spend", "2.990"), "2");
+        Assert.Equal(s + "3 نقاط", QrReceipt.Caption("spend", "3.000"), "3");
+        Assert.Equal(s + "10 نقاط", QrReceipt.Caption("spend", "10.500"), "10");
+        Assert.Equal(s + "11 نقطة", QrReceipt.Caption("spend", "11.000"), "11");
+        Assert.Equal(s + "125 نقطة", QrReceipt.Caption(null, "125.750"), "unknown mode counts as spend");
+        Assert.Equal(s + "نقاط فاتورتك", QrReceipt.Caption("spend", "0.750"), "under 1 JOD");
+        Assert.Equal(s + "نقاط فاتورتك", QrReceipt.Caption("spend", null), "amount not known");
+        Assert.Equal(s + "نقاط فاتورتك", QrReceipt.Caption("spend", "abc"), "amount unreadable");
+        Assert.Equal(s + "ختم", QrReceipt.Caption("visit", "12.500"), "visit");
+        Assert.Equal(s + "ختم", QrReceipt.Caption("visit", null), "visit instant");
+        // The slip carries it bold; the instant pool slip has no amount yet.
+        const string url = "https://daymanjo.com/c/abc/s/K7Q2M9XP";
+        var full = Convert.ToHexString(QrReceipt.Build(url, 864, 22, "12.500", "spend"));
+        Assert.True(full.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(s + "12 نقطة", 864)) + "1B2100"), "points caption");
+        var visit = Convert.ToHexString(QrReceipt.Build(url, 864, 22, "12.500", "visit"));
+        Assert.True(visit.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(s + "ختم", 864)) + "1B2100"), "stamp caption");
+        var instant = Convert.ToHexString(QrReceipt.Build(url, 864, 22, stampMode: "spend"));
+        Assert.True(instant.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(s + "نقاط فاتورتك", 864)) + "1B2100"), "instant caption");
+    }
+
+    // WO-107: no invoice or amount line in any code page, nor in ASCII; the footer follows the QR.
+    public static void TestQrNoInvoiceLine()
     {
         const string url = "https://daymanjo.com/c/abc/s/K7Q2M9XP";
-        string line = QrReceipt.InvoiceLine("10432", "12.500");
-        Assert.Equal("فاتورة 10432 · 12.500 د.أ", line, "line text");
         foreach (int cp in new[] { 864, 720, 1256, 65001 })
         {
-            var slip = QrReceipt.Build(url, cp, 22, "10432", "12.500");
-            var lineBytes = ArabicPrintEncoder.Encode(line, cp);
-            Assert.True(!lineBytes.Contains((byte)'?'), "unencodable glyph in " + cp);
-            // WO-101: the invoice line right under the QR, then the small footer.
-            var expected = "1D286B03003151300A" + Convert.ToHexString(lineBytes) + "0A1B2101";
-            Assert.True(Convert.ToHexString(slip).Contains(expected), "line right under the QR in " + cp);
-            // Printed in visual order: the digits stay readable left to right, the Arabic reads back as written.
-            var back = cp == 65001 ? System.Text.Encoding.UTF8.GetString(lineBytes) : ReceiptAnalyzer.GetDecoder(cp).GetString(lineBytes);
-            Assert.True(back.Contains("10432") && back.Contains("12.500"), "digits readable in " + cp + ": " + back);
-            if (cp == 65001) { Assert.Equal(line, back, "utf-8 line"); continue; }
-            var arabic = TextNormalizer.Normalize(TextNormalizer.Reverse(back)).Replace("23401", "10432").Replace("005.21", "12.500");
-            Assert.Equal(TextNormalizer.Normalize(line), arabic, "line " + cp);
+            var slip = Convert.ToHexString(QrReceipt.Build(url, cp, 22, "12.500", "spend"));
+            Assert.True(slip.Contains("1D286B03003151300A1B2101"), "footer right under the QR in " + cp);
         }
-        // No known decoding: no Arabic, the same facts in ASCII.
-        var plain = System.Text.Encoding.ASCII.GetString(QrReceipt.Build(url, null, null, "10432", "12.500"));
-        Assert.True(plain.Contains("10432 - 12.500 JOD\n"), "ascii line");
+        var plain = System.Text.Encoding.ASCII.GetString(QrReceipt.Build(url, null, null, "12.500", "spend"));
+        Assert.True(!plain.Contains("12.500") && !plain.Contains("JOD"), "no ascii amount line");
         Assert.True(plain.Contains("Dayman") && !plain.Contains("\u001B!\u0008"), "ascii footer, no Arabic caption");
-        // A control character from the extractor never reaches the printer.
-        var esc = System.Text.Encoding.ASCII.GetString(QrReceipt.Build(url, null, null, "10\u001B432", "1.000"));
-        Assert.True(esc.Contains("10432 - 1.000 JOD\n"), "no ESC from the invoice");
-        // Without an invoice the slip is as before.
-        Assert.Equal(Convert.ToHexString(QrReceipt.Build(url, 864, 22)), Convert.ToHexString(QrReceipt.Build(url, 864, 22, null, null)), "unchanged without invoice");
     }
 
     public static void TestQrRejectsBadUrl()

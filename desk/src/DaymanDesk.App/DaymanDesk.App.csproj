@@ -12,7 +12,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>DaymanDesk</AssemblyName>
     <RootNamespace>DaymanDesk.App</RootNamespace>
-    <Version>2.5.3</Version>
+    <Version>2.5.4</Version>
     <Product>دايماً ديسك</Product>
     <PlatformTarget>AnyCPU</PlatformTarget>
     <Prefer32Bit>false</Prefer32Bit>
