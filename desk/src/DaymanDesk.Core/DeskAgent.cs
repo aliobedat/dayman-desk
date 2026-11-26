@@ -186,6 +186,7 @@ public sealed class DeskAgent
         bool nonReceipt = false, ocrAgree = true;
         IReadOnlyList<string> second = Array.Empty<string>();
         Instant? instant = null;
+        string? instantSkipped = null;
         try
         {
             analysis = ReceiptAnalyzer.Analyze(job);
@@ -194,7 +195,7 @@ public sealed class DeskAgent
             {
                 var bmp = _ocr == null ? null : RasterDecoder.Decode(job);
                 // WO-105: a pool QR right after the receipt, before the OCR (the next job, a kitchen ticket, comes ~1 s later).
-                if (bmp != null && !printerUnreachable) instant = PrintInstant(bmp.Height, seqAfterForward);
+                if (bmp != null && !printerUnreachable) (instant, instantSkipped) = PrintInstant(bmp.Height, seqAfterForward);
                 image = await ReadImageAsync(bmp, (a, b) => { lines = a; second = b; }).ConfigureAwait(false);
                 if (image == ImageRead.Read && bmp != null) height = bmp.Height;
             }
@@ -258,6 +259,8 @@ public sealed class DeskAgent
                 }
             });
             await HandleAsync(job, forwardMs, seqAfterForward, analysis, lines, image, ext, rec, printerUnreachable, ocrAgree, after, instant).ConfigureAwait(false);
+            // WO-106: why an image receipt got no QR before the OCR, on its row (a kitchen ticket's is expected, not shown).
+            if (instantSkipped != null && !rec.NonReceipt && !rec.QrPrinted) rec.Status += " (QR فوري: " + instantSkipped + ")";
             if (instant != null && !instant.Used)
             {
                 // The slip printed before the OCR, and this job turned out not to be a readable receipt: its code stays unbound.
@@ -332,15 +335,19 @@ public sealed class DeskAgent
     }
 
     /// <summary>
-    /// WO-105: for an image as tall as the receipts the OCR has seen (and taller than any picture that was not one), prints
-    /// a slip with the next pool code at once: no invoice line (the OCR has not read it yet). Null: not printed (no pool,
-    /// nothing learned yet, not paired or confirmed, QR off, or another job already came): the receipt goes as before.
+    /// WO-105: for an image tall enough to be a receipt (WO-106: above 1.5x the tallest non-receipt picture, else 60% of the
+    /// receipts' learned height), prints a slip with the next pool code at once: no invoice line (the OCR has not read it
+    /// yet). Not printed: the Arabic reason for the row (null when QR does not apply); the receipt then goes as before.
     /// </summary>
-    Instant? PrintInstant(int height, long seq)
+    (Instant?, string?) PrintInstant(int height, long seq)
     {
         var c = _cfg.Current;
-        if (!c.Paired || !c.FieldsConfirmed || !c.QrEnabled || c.ImageReceiptMinHeight <= 0
-            || height < c.ImageReceiptMinHeight || height <= c.ImageOtherMaxHeight) return null;
+        if (!c.Paired || !c.FieldsConfirmed || !c.QrEnabled) return (null, null);
+        // WO-106: a picture is a receipt candidate when it is clearly taller (x1.5) than any picture that was not a
+        // receipt; before such a picture was seen, when it reaches 60% of the receipts' learned height.
+        int floor = c.ImageOtherMaxHeight > 0 ? c.ImageOtherMaxHeight * 3 / 2 + 1 : c.ImageReceiptMinHeight * 6 / 10;
+        if (c.ImageOtherMaxHeight <= 0 && c.ImageReceiptMinHeight <= 0) return Skip("not learned", "لم يتعلّم البرنامج طول الفاتورة بعد");
+        if (height < floor) return Skip($"below height ({height} < {floor} rows)", "أقصر من حد الفاتورة");
         PoolCode? taken = null;
         _cfg.Update(x =>
         {
@@ -350,7 +357,7 @@ public sealed class DeskAgent
             taken = x.CodePool[0];
             x.CodePool.RemoveAt(0);
         });
-        if (taken == null) return null;
+        if (taken == null) return Skip("pool empty", "لا أكواد جاهزة");
         c = _cfg.Current;
         bool printed = false;
         try { printed = _printIfCurrent(seq, QrReceipt.Build(c.ClaimBase + taken.Code, c.CodePage, c.CodeTable)); }
@@ -358,11 +365,17 @@ public sealed class DeskAgent
         if (!printed)
         {
             _cfg.Update(x => { if (!x.CodePool.Any(p => p.Code == taken.Code)) x.CodePool.Insert(0, taken); });
-            return null;
+            return Skip("slip not printed (another job came first)", "طُبع شيء بعدها");
         }
         _log.Info($"image receipt: pool qr printed before the ocr ({height} rows)");
         ClearProblem(Problems.QrPrintFailed);
-        return new Instant(taken.Code);
+        return (new Instant(taken.Code), null);
+    }
+
+    (Instant?, string?) Skip(string why, string arabic)
+    {
+        _log.Info("instant qr skipped: " + why);
+        return (null, arabic);
     }
 
     /// <summary>WO-105: the OCR's verdict on an image teaches the heights PrintInstant goes by.</summary>

@@ -91,8 +91,8 @@ public sealed class DeskConfig
 
     // WO-105: image receipts print a pool QR before the OCR. A kitchen ticket is an image too, so the picture's height
     // tells them apart, learned from the OCR's verdicts: the shortest receipt seen and the tallest image that was not
-    // one (0 = none yet). The QR is printed at once only for a picture at least as tall as the first and taller than
-    // the second.
+    // one (0 = none yet). WO-106: the QR is printed at once for a picture taller than 1.5x the second, or, before
+    // any non-receipt was seen, at least 60% of the first.
     public int ImageReceiptMinHeight { get; set; }
     public int ImageOtherMaxHeight { get; set; }
 

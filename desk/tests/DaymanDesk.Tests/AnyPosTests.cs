@@ -685,7 +685,8 @@ public static class AnyPosTests
             c.ImageReceiptMinHeight = learnedHeight;
             c.ImageOtherMaxHeight = learnedHeight > 0 ? 150 : 0;
         });
-        rig.Ocr.Read = b => b.Height % 400 == 0 ? OcrReceipt : KitchenOcr;
+        // Kitchen tickets are 150 rows (300 in the 2x read); receipts 400 or 280.
+        rig.Ocr.Read = b => b.Height == 150 || b.Height == 300 ? KitchenOcr : OcrReceipt;
         rig.Http.Respond = (r, body) =>
         {
             if (!r.RequestUri!.AbsolutePath.EndsWith("/receipt")) return new HttpResponseMessage(HttpStatusCode.NoContent);
@@ -765,6 +766,32 @@ public static class AnyPosTests
         var later = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 5);
         Assert.True(later.Registered && later.QrPrinted, later.Status);
         Assert.Equal(3, rig.Printed.Count, "slip after the OCR");
+    }
+
+    /// <summary>
+    /// WO-106 (Jamra on 2.5.2): a receipt shorter than the first one still gets its slip before the OCR, once a kitchen
+    /// ticket taught the non-receipt height (the gate is 1.5x the tallest non-receipt, not the shortest receipt).
+    /// </summary>
+    public static async Task TestShorterReceiptStillGetsInstantQr()
+    {
+        var rig = PoolRig(0, "K7Q2M9XP0A", "K7Q2M9XP0B");
+        await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 1);           // the first, 400 rows: QR after the OCR
+        await rig.Agent.ProcessJobAsync(Receipts.Raster(150), 5, 2);        // its kitchen ticket
+        Assert.Equal(400, rig.Cfg.Current.ImageReceiptMinHeight, "receipt height");
+        Assert.Equal(150, rig.Cfg.Current.ImageOtherMaxHeight, "kitchen height");
+        int printedBefore = rig.Printed.Count;
+        int printedAtOcr = -1;
+        rig.Ocr.Read = b => { if (printedAtOcr < 0) printedAtOcr = rig.Printed.Count; return b.Height == 150 || b.Height == 300 ? KitchenOcr : OcrReceipt; };
+        var rec = await rig.Agent.ProcessJobAsync(Receipts.Raster(280), 5, 3); // a shorter receipt (fewer items)
+        Assert.Equal(printedBefore + 1, printedAtOcr, "slip printed before the OCR started");
+        Assert.True(rec.QrPrinted && rec.Registered, rec.Status);
+        Assert.True(HasUrl(rig.Printed.Last(), PoolBase), "a pool slip");
+        Assert.Equal(printedBefore + 1, rig.Printed.Count, "one slip only");
+        // Below the gate, or with an empty pool, the row says why no QR came before the OCR.
+        rig.Cfg.Update(c => c.CodePool.Clear());
+        rig.PrintIfCurrent = (_, _) => false; // the kitchen ticket came first: the late slip does not print
+        var late = await rig.Agent.ProcessJobAsync(Receipts.Raster(), 5, 4);
+        Assert.True(late.Status.Contains("لا أكواد جاهزة"), late.Status);
     }
 
     /// <summary>WO-105: two OCR reads agree on normalized values; an OCR label one letter off still matches.</summary>
