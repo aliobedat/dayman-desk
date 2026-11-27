@@ -237,6 +237,25 @@ public static class QrTests
         Assert.True(slip.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(c, 864)) + "1B2100"), "fixed caption on the slip");
     }
 
+    // WO-115: an image-receipt shop (no code page) gets the caption as a picture from the App.
+    public static void TestCaptionPictureWithoutCodePage()
+    {
+        var pic = new byte[] { 0x1D, 0x76, 0x30, 0x00, 0x01, 0x00, 0x01, 0x00, 0xAA };
+        string? drawn = null;
+        QrReceipt.RasterText = t => { drawn = t; return pic; };
+        try
+        {
+            var slip = Convert.ToHexString(QrReceipt.Build("https://daymanjo.com/c/abc/s/K7Q2M9XP", null, null));
+            Assert.Equal(QrReceipt.FixedCaption, drawn, "caption drawn");
+            Assert.True(slip.IndexOf(Convert.ToHexString(pic), StringComparison.Ordinal) is int i && i > 0
+                && i < slip.IndexOf("1D286B0300315130", StringComparison.Ordinal), "picture before the QR");
+            drawn = null;
+            QrReceipt.Build("https://daymanjo.com/c/abc/s/K7Q2M9XP", 864, 22);
+            Assert.True(drawn == null, "text caption when the code page is known");
+        }
+        finally { QrReceipt.RasterText = null; }
+    }
+
     // WO-107: no invoice or amount line in any code page, nor in ASCII; the footer follows the QR.
     public static void TestQrNoInvoiceLine()
     {

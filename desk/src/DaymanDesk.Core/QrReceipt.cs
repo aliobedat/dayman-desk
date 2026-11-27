@@ -14,6 +14,12 @@ public static class QrReceipt
     /// <summary>The bold caption over the QR (WO-113: fixed; the parameters are kept for the call sites).</summary>
     public static string Caption(string? stampMode, string? amount) => FixedCaption;
 
+    /// <summary>
+    /// WO-115: draws one centred Arabic line as an ESC/POS raster image (GS v 0), set by the App (Windows fonts shape
+    /// Arabic). Used for the caption when the shop's code page is unknown (image receipts, Talla). Null in tests.
+    /// </summary>
+    public static Func<string, byte[]?>? RasterText { get; set; }
+
     /// <summary>The small footer: the brand without its tanween (no code page the printers use has the mark).</summary>
     public const string Footer = "دايما";
     /// <summary>A thin line in ASCII (the same bytes in every code page), 32 columns: fits 58 mm and 80 mm paper.</summary>
@@ -43,6 +49,12 @@ public static class QrReceipt
             o.AddRange(ArabicPrintEncoder.Encode(Caption(stampMode, amount), codePage.Value));
             o.AddRange(new byte[] { 0x1B, 0x21, 0x00 });
             o.Add(0x0A);
+        }
+        else
+        {
+            byte[]? picture = null;
+            try { picture = RasterText?.Invoke(Caption(stampMode, amount)); } catch { picture = null; }
+            if (picture != null) o.AddRange(picture);
         }
         o.AddRange(new byte[] { 0x1D, 0x28, 0x6B, 0x04, 0x00, 0x31, 0x41, 0x32, 0x00 });  // model 2
         o.AddRange(new byte[] { 0x1D, 0x28, 0x6B, 0x03, 0x00, 0x31, 0x43, (byte)size });  // module size

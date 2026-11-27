@@ -40,6 +40,41 @@ static class Program
     [System.Runtime.InteropServices.DllImport("kernel32.dll")]
     static extern uint SetErrorMode(uint mode);
 
+    /// <summary>
+    /// WO-115: the slip caption as a GS v 0 raster, 384 dots wide (fits 58 and 80 mm; centred by ESC a 1), drawn with
+    /// Tahoma bold so Windows shapes the Arabic; black where the drawn pixel is dark.
+    /// </summary>
+    static byte[]? CaptionPicture(string text)
+    {
+        const int width = 384;
+        using var font = new System.Drawing.Font("Tahoma", 22, System.Drawing.FontStyle.Bold, System.Drawing.GraphicsUnit.Pixel);
+        using var format = new System.Drawing.StringFormat(System.Drawing.StringFormatFlags.DirectionRightToLeft)
+        { Alignment = System.Drawing.StringAlignment.Center };
+        int height;
+        using (var probe = new System.Drawing.Bitmap(1, 1))
+        using (var g = System.Drawing.Graphics.FromImage(probe))
+            height = (int)Math.Ceiling(g.MeasureString(text, font, width, format).Height) + 4;
+        if (height <= 4 || height > 400) return null;
+        using var bmp = new System.Drawing.Bitmap(width, height);
+        using (var g = System.Drawing.Graphics.FromImage(bmp))
+        {
+            g.Clear(System.Drawing.Color.White);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
+            g.DrawString(text, font, System.Drawing.Brushes.Black, new System.Drawing.RectangleF(0, 2, width, height - 2), format);
+        }
+        int row = width / 8;
+        var o = new List<byte> { 0x1D, 0x76, 0x30, 0x00, (byte)(row & 0xFF), (byte)(row >> 8), (byte)(height & 0xFF), (byte)(height >> 8) };
+        for (int y = 0; y < height; y++)
+            for (int b = 0; b < row; b++)
+            {
+                byte v = 0;
+                for (int i = 0; i < 8; i++)
+                    if (bmp.GetPixel(b * 8 + i, y).GetBrightness() < 0.5f) v |= (byte)(0x80 >> i);
+                o.Add(v);
+            }
+        return o.ToArray();
+    }
+
     [STAThread]
     static int Main(string[] args)
     {
@@ -108,6 +143,7 @@ static class Program
         };
         TaskScheduler.UnobservedTaskException += (_, e) => { rt.Log.Error("task error " + e.Exception.Message); e.SetObserved(); };
 
+        QrReceipt.RasterText = CaptionPicture;
         rt.Start();
         if (updatedFrom != null) rt.UpdatedFrom(updatedFrom);
         Application.Run(new MainForm(rt, startHidden: args.Contains("--tray")));
