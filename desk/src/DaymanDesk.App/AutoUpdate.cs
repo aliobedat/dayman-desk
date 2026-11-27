@@ -62,6 +62,13 @@ static class AutoUpdate
                 var fv = FileVersionInfo.GetVersionInfo(exe).ProductVersion;
                 if (!Updater.VersionOk(v, fv, Runtime.Version)) throw new InvalidOperationException($"file version {fv}, announced {v}");
             }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+            {
+                // WO-114: the shop's internet dropped: no 24-hour skip, the next hourly attempt tries again.
+                rt.Log.Warn($"update {v}: download interrupted, retry within the hour: {ex.Message}");
+                Delete(exe);
+                return;
+            }
             catch (Exception ex)
             {
                 Fail(rt, v, "download: " + ex.Message);
