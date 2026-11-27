@@ -153,7 +153,7 @@ public static class AgentTests
         Assert.Equal(1, rig.Printed.Count, "one slip");
         Assert.True(Convert.ToHexString(rig.Printed[0]).Contains(Convert.ToHexString(System.Text.Encoding.ASCII.GetBytes(Claim))), "slip carries claim url");
         // WO-107: the caption carries the receipt's points (6.670 JOD), with no invoice line.
-        Assert.True(Convert.ToHexString(rig.Printed[0]).Contains(Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.CaptionStart + "6 نقاط", 864))), "slip carries the points");
+        Assert.True(Convert.ToHexString(rig.Printed[0]).Contains(Convert.ToHexString(ArabicPrintEncoder.Encode(QrReceipt.FixedCaption, 864))), "slip carries the fixed caption");
         var body = rig.Http.Calls.First(c => c.req.RequestUri!.AbsolutePath.EndsWith("/receipt")).body;
         using var doc = JsonDocument.Parse(body);
         Assert.Equal("10432", doc.RootElement.GetProperty("invoiceNo").GetString(), "invoice");

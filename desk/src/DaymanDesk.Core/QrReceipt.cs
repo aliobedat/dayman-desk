@@ -8,27 +8,11 @@ namespace DaymanDesk.Core;
 /// </summary>
 public static class QrReceipt
 {
-    /// <summary>WO-107: the caption's start; what he gets follows it.</summary>
-    public const string CaptionStart = "امسح الكود واحصل على ";
+    /// <summary>WO-113 (Ali): one fixed caption on every slip, whatever the shop's mode or the receipt's amount.</summary>
+    public const string FixedCaption = "امسح لتجميع النقاط والحصول على مكافآت";
 
-    /// <summary>The bold caption: «ختم» in a visit-mode shop; in a points shop the receipt's points, floor(amount in JOD),
-    /// in the Arabic count form; «نقاط فاتورتك» when the amount is not known yet (instant slip) or under 1 JOD.</summary>
-    public static string Caption(string? stampMode, string? amount)
-    {
-        if (stampMode == "visit") return CaptionStart + "ختم";
-        long n = 0;
-        if (amount != null && decimal.TryParse(amount, System.Globalization.NumberStyles.AllowDecimalPoint,
-                System.Globalization.CultureInfo.InvariantCulture, out var jod) && jod < 1_000_000_000m)
-            n = (long)Math.Floor(jod);
-        return CaptionStart + n switch
-        {
-            <= 0 => "نقاط فاتورتك",
-            1 => "نقطة واحدة",
-            2 => "نقطتين",
-            <= 10 => $"{n} نقاط",
-            _ => $"{n} نقطة",
-        };
-    }
+    /// <summary>The bold caption over the QR (WO-113: fixed; the parameters are kept for the call sites).</summary>
+    public static string Caption(string? stampMode, string? amount) => FixedCaption;
 
     /// <summary>The small footer: the brand without its tanween (no code page the printers use has the mark).</summary>
     public const string Footer = "دايما";

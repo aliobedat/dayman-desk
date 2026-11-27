@@ -226,29 +226,15 @@ public static class QrTests
         }
     }
 
-    // WO-107: the caption says what the scan gives, in the Arabic count form.
-    public static void TestCaptionCountForms()
+    // WO-113: one fixed caption on every slip.
+    public static void TestCaptionFixed()
     {
-        const string s = QrReceipt.CaptionStart;
-        Assert.Equal(s + "نقطة واحدة", QrReceipt.Caption("spend", "1.000"), "1");
-        Assert.Equal(s + "نقطتين", QrReceipt.Caption("spend", "2.990"), "2");
-        Assert.Equal(s + "3 نقاط", QrReceipt.Caption("spend", "3.000"), "3");
-        Assert.Equal(s + "10 نقاط", QrReceipt.Caption("spend", "10.500"), "10");
-        Assert.Equal(s + "11 نقطة", QrReceipt.Caption("spend", "11.000"), "11");
-        Assert.Equal(s + "125 نقطة", QrReceipt.Caption(null, "125.750"), "unknown mode counts as spend");
-        Assert.Equal(s + "نقاط فاتورتك", QrReceipt.Caption("spend", "0.750"), "under 1 JOD");
-        Assert.Equal(s + "نقاط فاتورتك", QrReceipt.Caption("spend", null), "amount not known");
-        Assert.Equal(s + "نقاط فاتورتك", QrReceipt.Caption("spend", "abc"), "amount unreadable");
-        Assert.Equal(s + "ختم", QrReceipt.Caption("visit", "12.500"), "visit");
-        Assert.Equal(s + "ختم", QrReceipt.Caption("visit", null), "visit instant");
-        // The slip carries it bold; the instant pool slip has no amount yet.
-        const string url = "https://daymanjo.com/c/abc/s/K7Q2M9XP";
-        var full = Convert.ToHexString(QrReceipt.Build(url, 864, 22, "12.500", "spend"));
-        Assert.True(full.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(s + "12 نقطة", 864)) + "1B2100"), "points caption");
-        var visit = Convert.ToHexString(QrReceipt.Build(url, 864, 22, "12.500", "visit"));
-        Assert.True(visit.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(s + "ختم", 864)) + "1B2100"), "stamp caption");
-        var instant = Convert.ToHexString(QrReceipt.Build(url, 864, 22, stampMode: "spend"));
-        Assert.True(instant.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(s + "نقاط فاتورتك", 864)) + "1B2100"), "instant caption");
+        const string c = QrReceipt.FixedCaption;
+        Assert.Equal(c, QrReceipt.Caption("spend", "12.500"), "spend");
+        Assert.Equal(c, QrReceipt.Caption("visit", null), "visit");
+        Assert.Equal(c, QrReceipt.Caption(null, null), "instant");
+        var slip = Convert.ToHexString(QrReceipt.Build("https://daymanjo.com/c/abc/s/K7Q2M9XP", 864, 22, "12.500", "spend"));
+        Assert.True(slip.Contains("1B2108" + Convert.ToHexString(ArabicPrintEncoder.Encode(c, 864)) + "1B2100"), "fixed caption on the slip");
     }
 
     // WO-107: no invoice or amount line in any code page, nor in ASCII; the footer follows the QR.
